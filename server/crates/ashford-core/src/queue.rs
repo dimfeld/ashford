@@ -478,7 +478,9 @@ mod tests {
 
     async fn setup_queue() -> (JobQueue, TempDir) {
         let dir = TempDir::new().expect("temp dir");
-        let db_path = dir.path().join("db.sqlite");
+        // Use a unique database filename to avoid any potential conflicts
+        let db_name = format!("db_{}.sqlite", uuid::Uuid::new_v4());
+        let db_path = dir.path().join(db_name);
         let db = Database::new(db_path.as_path()).await.expect("create db");
         run_migrations(&db).await.expect("migrations");
         (JobQueue::new(db), dir)

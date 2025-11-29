@@ -17,6 +17,8 @@ const ACCOUNT_COLUMNS: &str =
 pub struct PubsubConfig {
     pub topic: Option<String>,
     pub subscription: Option<String>,
+    #[serde(default)]
+    pub service_account_json: Option<String>,
 }
 
 impl Default for PubsubConfig {
@@ -24,6 +26,7 @@ impl Default for PubsubConfig {
         Self {
             topic: None,
             subscription: None,
+            service_account_json: None,
         }
     }
 }
@@ -364,7 +367,9 @@ mod tests {
 
     async fn setup_repo() -> (AccountRepository, TempDir) {
         let dir = TempDir::new().expect("temp dir");
-        let db_path = dir.path().join("db.sqlite");
+        // Use a unique database filename to avoid any potential conflicts
+        let db_name = format!("db_{}.sqlite", uuid::Uuid::new_v4());
+        let db_path = dir.path().join(db_name);
         let db = Database::new(&db_path).await.expect("create db");
         run_migrations(&db).await.expect("migrations");
         (AccountRepository::new(db), dir)
@@ -382,6 +387,7 @@ mod tests {
             pubsub: PubsubConfig {
                 topic: Some("projects/example/topics/gmail".into()),
                 subscription: Some("projects/example/subscriptions/gmail".into()),
+                service_account_json: None,
             },
         }
     }
@@ -471,6 +477,35 @@ mod tests {
             .await
             .expect_err("should be gone");
         assert!(matches!(err, AccountError::NotFound(_)));
+    }
+
+    #[test]
+    fn pubsub_config_defaults_without_service_account_json() {
+        let json = serde_json::json!({
+            "client_id": "client",
+            "client_secret": "secret",
+            "oauth": {
+                "access_token": "access",
+                "refresh_token": "refresh",
+                "expires_at": "2025-01-01T00:00:00Z"
+            },
+            "pubsub": {
+                "topic": "projects/example/topics/gmail",
+                "subscription": "projects/example/subscriptions/gmail"
+            }
+        })
+        .to_string();
+
+        let config: AccountConfig = serde_json::from_str(&json).expect("deserialize config");
+        assert_eq!(
+            config.pubsub.topic.as_deref(),
+            Some("projects/example/topics/gmail")
+        );
+        assert_eq!(
+            config.pubsub.subscription.as_deref(),
+            Some("projects/example/subscriptions/gmail")
+        );
+        assert_eq!(config.pubsub.service_account_json, None);
     }
 
     #[tokio::test]
@@ -604,5 +639,25 @@ mod tests {
             .await
             .expect_err("update missing should fail");
         assert!(matches!(missing_update, AccountError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn service_account_json_roundtrips_through_storage() {
+        let (repo, _dir) = setup_repo().await;
+        let mut config = sample_config(Duration::hours(1));
+        let credentials = r#"{"type":"service_account","client_email":"svc@example.com"}"#;
+        config.pubsub.service_account_json = Some(credentials.into());
+
+        let account = repo
+            .create("user@example.com", None, config.clone())
+            .await
+            .expect("create account");
+
+        let stored = repo.get_by_id(&account.id).await.expect("load stored");
+        assert_eq!(
+            stored.config.pubsub.service_account_json.as_deref(),
+            Some(credentials)
+        );
+        assert_eq!(stored.config.pubsub, config.pubsub);
     }
 }

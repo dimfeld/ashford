@@ -1,7 +1,8 @@
 use std::{env, net::SocketAddr};
 
+use ashford_core::pubsub_listener::run_pubsub_supervisor;
 use ashford_core::{
-    Config, Database, JobQueue, NoopExecutor, WorkerConfig, init_telemetry, migrations,
+    Config, Database, JobDispatcher, JobQueue, WorkerConfig, init_telemetry, migrations, run_worker,
 };
 use axum::{Json, Router, extract::State, http::StatusCode, routing::get};
 use serde::Serialize;
@@ -24,13 +25,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     migrations::run_migrations(&db).await?;
 
     let queue = JobQueue::new(db.clone());
+    let dispatcher = JobDispatcher::new(db.clone(), reqwest::Client::new());
     let shutdown = CancellationToken::new();
     let worker_shutdown = shutdown.child_token();
-    let worker_handle = tokio::spawn(ashford_core::run_worker(
-        queue,
-        NoopExecutor,
+    let worker_handle = tokio::spawn(run_worker(
+        queue.clone(),
+        dispatcher.clone(),
         WorkerConfig::default(),
         worker_shutdown,
+    ));
+    let supervisor_handle = tokio::spawn(run_pubsub_supervisor(
+        db.clone(),
+        queue.clone(),
+        shutdown.child_token(),
     ));
 
     let state = AppState { db: db.clone() };
@@ -45,7 +52,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
 
     shutdown.cancel();
-    let _ = worker_handle.await;
+    if let Err(err) = worker_handle.await {
+        warn!("worker task join error: {err}");
+    }
+    match supervisor_handle.await {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => warn!("pubsub supervisor exited with error: {err}"),
+        Err(err) => warn!("pubsub supervisor join error: {err}"),
+    }
     Ok(())
 }
 

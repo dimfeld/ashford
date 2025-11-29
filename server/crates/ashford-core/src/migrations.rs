@@ -19,6 +19,10 @@ static MIGRATIONS: &[Migration] = &[
         version: "002_add_job_completion_fields",
         sql: include_str!("../../../migrations/002_add_job_completion_fields.sql"),
     },
+    Migration {
+        version: "003_add_thread_message_unique_indices",
+        sql: include_str!("../../../migrations/003_add_thread_message_unique_indices.sql"),
+    },
 ];
 
 #[derive(Error, Debug)]
@@ -139,7 +143,7 @@ mod tests {
             .expect("row value")
             .get(0)
             .expect("count");
-        assert_eq!(count, 2, "migrations should only record once each");
+        assert_eq!(count, 3, "migrations should only record once each");
     }
 
     #[tokio::test]
