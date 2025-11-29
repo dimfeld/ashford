@@ -6,13 +6,15 @@ goal: Set up Rust project structure, libsql database with migrations, job queue,
 id: 2
 uuid: 85389e56-6e82-4b14-b6ab-153a10439a6e
 generatedBy: agent
-status: pending
+status: done
 priority: high
 container: false
 temp: false
 dependencies: []
 parent: 1
+references: {}
 issue: []
+pullRequest: []
 docs:
   - docs/job_queue.md
   - docs/data_model.md
@@ -21,41 +23,186 @@ docs:
 planGeneratedAt: 2025-11-29T01:23:11.754Z
 promptsGeneratedAt: 2025-11-29T01:23:11.754Z
 createdAt: 2025-11-29T01:21:26.633Z
-updatedAt: 2025-11-29T01:23:11.754Z
+updatedAt: 2025-11-29T03:18:18.636Z
+progressNotes:
+  - timestamp: 2025-11-29T01:44:01.557Z
+    text: Converted server into Cargo workspace with core and server crates; added
+      config/db/migrations scaffolding and initial migration file; cargo build
+      now passes.
+    source: "implementer: tasks 1-4"
+  - timestamp: 2025-11-29T01:52:57.933Z
+    text: Added config/db/migration test coverage; fixed db health_check to use
+      SELECT query and verified cargo test passes.
+    source: "tester: milestone1-tests"
+  - timestamp: 2025-11-29T02:20:09.343Z
+    text: Added telemetry module with tracing init + OTLP exporter support,
+      structured logging formats, and wired into server main; cargo test
+      passing.
+    source: "implementer: tasks 5-6"
+  - timestamp: 2025-11-29T02:27:25.333Z
+    text: Added telemetry formatter test verifying trace IDs propagate to JSON logs;
+      fixed formatter to read trace_id from OtelData and ensured timestamps
+      accepted. Workspace tests now pass.
+    source: "tester: milestone1-tests"
+  - timestamp: 2025-11-29T02:58:14.560Z
+    text: Built queue module with job lifecycle + steps, added worker loop with
+      heartbeat and panic handling, wired HTTP /healthz startup, and added
+      queue/health tests; cargo test --workspace passing.
+    source: "implementer: tasks 7-11"
+  - timestamp: 2025-11-29T03:02:06.372Z
+    text: Added worker and queue coverage tests; cargo test --workspace now passes
+      with new cases for worker retry/fatal/panic flows, priority, not_before,
+      cancel, and heartbeat errors.
+    source: "tester: milestone1-tests"
 tasks:
   - title: Initialize Cargo workspace
-    done: false
-    description: "Convert server/ to a Cargo workspace with 2 crates: ashford-core (library with shared logic) and ashford-server (single binary running both API and queue worker). Create root Cargo.toml with [workspace] and shared dependency versions. Move existing dependencies to workspace level. ashford-server depends on ashford-core."
+    done: true
+    description: "Convert server/ to a Cargo workspace with 2 crates: ashford-core
+      (library with shared logic) and ashford-server (single binary running both
+      API and queue worker). Create root Cargo.toml with [workspace] and shared
+      dependency versions. Move existing dependencies to workspace level.
+      ashford-server depends on ashford-core."
   - title: Implement TOML configuration
-    done: false
-    description: "In ashford-core, create config module with structs matching configuration.md: AppConfig, PathsConfig, TelemetryConfig, ModelConfig, DiscordConfig, GmailConfig, ImapConfig, PolicyConfig. Implement TOML loading with serde, env var overrides (APP_PORT, OTLP_ENDPOINT, etc.), 'env:' prefix parsing for secrets, and tilde expansion for paths. Add config crate dependency."
+    done: true
+    description: "In ashford-core, create config module with structs matching
+      configuration.md: AppConfig, PathsConfig, TelemetryConfig, ModelConfig,
+      DiscordConfig, GmailConfig, ImapConfig, PolicyConfig. Implement TOML
+      loading with serde, env var overrides (APP_PORT, OTLP_ENDPOINT, etc.),
+      'env:' prefix parsing for secrets, and tilde expansion for paths. Add
+      config crate dependency."
   - title: Set up libsql connection
-    done: false
-    description: "In ashford-core, create db module with Database struct wrapping libsql::Database. Implement connect() that reads path from config, enables PRAGMA foreign_keys=ON, and returns connection. Support both local file paths and remote Turso URLs. Add connection health check method for /healthz."
+    done: true
+    description: In ashford-core, create db module with Database struct wrapping
+      libsql::Database. Implement connect() that reads path from config, enables
+      PRAGMA foreign_keys=ON, and returns connection. Support both local file
+      paths and remote Turso URLs. Add connection health check method for
+      /healthz.
   - title: Create database migrations
-    done: false
-    description: "In ashford-core, create migrations module with version tracking (schema_migrations table). Implement run_migrations() that executes SQL files in order. Create migrations/001_initial.sql with all 14 tables from data_model.md in correct dependency order: accounts, threads, messages, decisions, actions, action_links, jobs, job_steps, discord_whitelist, deterministic_rules, llm_rules, directions, rules_chat_sessions, rules_chat_messages. Include all indexes."
+    done: true
+    description: "In ashford-core, create migrations module with version tracking
+      (schema_migrations table). Implement run_migrations() that executes SQL
+      files in order. Create migrations/001_initial.sql with all 14 tables from
+      data_model.md in correct dependency order: accounts, threads, messages,
+      decisions, actions, action_links, jobs, job_steps, discord_whitelist,
+      deterministic_rules, llm_rules, directions, rules_chat_sessions,
+      rules_chat_messages. Include all indexes."
   - title: Add structured logging
-    done: false
-    description: "In ashford-core, create telemetry module. Set up tracing-subscriber with JSON formatting for production, pretty formatting for dev. Configure log levels via RUST_LOG env var. Create init_logging() function called early in both binaries. Add tracing and tracing-subscriber dependencies."
+    done: true
+    description: In ashford-core, create telemetry module. Set up tracing-subscriber
+      with JSON formatting for production, pretty formatting for dev. Configure
+      log levels via RUST_LOG env var. Create init_logging() function called
+      early in both binaries. Add tracing and tracing-subscriber dependencies.
   - title: Set up OpenTelemetry
-    done: false
-    description: "Extend telemetry module with OpenTelemetry initialization. Configure OTLP exporter (HTTP to configured endpoint). Set resource attributes: service.name, service.version (from CARGO_PKG_VERSION), deployment.environment, host.arch, os.type. Create TracingLayer that attaches trace IDs to logs. Handle missing OTLP endpoint gracefully (disable export). Add opentelemetry, opentelemetry-otlp, tracing-opentelemetry dependencies."
+    done: true
+    description: "Extend telemetry module with OpenTelemetry initialization.
+      Configure OTLP exporter (HTTP to configured endpoint). Set resource
+      attributes: service.name, service.version (from CARGO_PKG_VERSION),
+      deployment.environment, host.arch, os.type. Create TracingLayer that
+      attaches trace IDs to logs. Handle missing OTLP endpoint gracefully
+      (disable export). Add opentelemetry, opentelemetry-otlp,
+      tracing-opentelemetry dependencies."
   - title: Build job queue core
-    done: false
-    description: "In ashford-core, create queue module. Implement JobQueue struct with methods: enqueue(job_type, payload, idempotency_key, priority) -> Result<JobId>, claim_next() -> Result<Option<Job>> using atomic UPDATE...RETURNING, heartbeat(job_id), complete(job_id, result), fail(job_id, error, should_retry), cancel(job_id). Implement exponential backoff with jitter for retry scheduling (base 2s, max 5min, ±25% jitter). Add uuid, chrono, rand dependencies."
+    done: true
+    description: "In ashford-core, create queue module. Implement JobQueue struct
+      with methods: enqueue(job_type, payload, idempotency_key, priority) ->
+      Result<JobId>, claim_next() -> Result<Option<Job>> using atomic
+      UPDATE...RETURNING, heartbeat(job_id), complete(job_id, result),
+      fail(job_id, error, should_retry), cancel(job_id). Implement exponential
+      backoff with jitter for retry scheduling (base 2s, max 5min, ±25% jitter).
+      Add uuid, chrono, rand dependencies."
   - title: Add job step tracking
-    done: false
-    description: "Extend queue module with JobStep tracking. Add start_step(job_id, name) -> StepId, finish_step(step_id, result_json). Create JobContext struct that tracks current job and provides step helpers. Steps automatically record started_at/finished_at timestamps."
+    done: true
+    description: Extend queue module with JobStep tracking. Add start_step(job_id,
+      name) -> StepId, finish_step(step_id, result_json). Create JobContext
+      struct that tracks current job and provides step helpers. Steps
+      automatically record started_at/finished_at timestamps.
   - title: Create queue worker loop
-    done: false
-    description: "In ashford-core, implement worker module with async worker loop. Poll for jobs with configurable interval (default 1s). Claim and execute jobs, catching panics with std::panic::catch_unwind. Spawn heartbeat task that updates every 30s during execution. Respect not_before scheduling. Create JobExecutor trait for future job type handlers (stub implementation for now that just completes jobs). Return a future that can be spawned by the server binary."
+    done: true
+    description: In ashford-core, implement worker module with async worker loop.
+      Poll for jobs with configurable interval (default 1s). Claim and execute
+      jobs, catching panics with std::panic::catch_unwind. Spawn heartbeat task
+      that updates every 30s during execution. Respect not_before scheduling.
+      Create JobExecutor trait for future job type handlers (stub implementation
+      for now that just completes jobs). Return a future that can be spawned by
+      the server binary.
   - title: Implement HTTP server with /healthz
-    done: false
-    description: "In ashford-server binary, create main() that initializes config, logging, telemetry, database, and runs migrations. Spawn queue worker loop as background task. Start axum HTTP server on configured port. Add GET /healthz endpoint returning JSON {status, version, database}. Check database connectivity, return 200 if healthy, 503 if unhealthy. Implement graceful shutdown on SIGTERM/SIGINT that stops both HTTP server and queue worker."
+    done: true
+    description: In ashford-server binary, create main() that initializes config,
+      logging, telemetry, database, and runs migrations. Spawn queue worker loop
+      as background task. Start axum HTTP server on configured port. Add GET
+      /healthz endpoint returning JSON {status, version, database}. Check
+      database connectivity, return 200 if healthy, 503 if unhealthy. Implement
+      graceful shutdown on SIGTERM/SIGINT that stops both HTTP server and queue
+      worker.
   - title: Add unit tests
-    done: false
-    description: "In ashford-core, add tests for: config loading with env overrides, queue operations (enqueue, claim, complete, fail, retry scheduling), idempotency key deduplication, job step tracking. Use in-memory libsql database (':memory:') for tests. Test concurrent claim behavior."
+    done: true
+    description: "In ashford-core, add tests for: config loading with env overrides,
+      queue operations (enqueue, claim, complete, fail, retry scheduling),
+      idempotency key deduplication, job step tracking. Use in-memory libsql
+      database (':memory:') for tests. Test concurrent claim behavior."
+changedFiles:
+  - server/.gitignore
+  - server/Cargo.lock
+  - server/Cargo.toml
+  - server/crates/ashford-core/Cargo.toml
+  - server/crates/ashford-core/src/config.rs
+  - server/crates/ashford-core/src/db.rs
+  - server/crates/ashford-core/src/lib.rs
+  - server/crates/ashford-core/src/migrations.rs
+  - server/crates/ashford-core/src/queue.rs
+  - server/crates/ashford-core/src/telemetry.rs
+  - server/crates/ashford-core/src/worker.rs
+  - server/crates/ashford-server/Cargo.toml
+  - server/crates/ashford-server/src/main.rs
+  - server/migrations/001_initial.sql
+  - server/migrations/002_add_job_completion_fields.sql
+  - web/.prettierrc
+  - web/CLAUDE.md
+  - web/eslint.config.js
+  - web/src/lib/components/ui/alert/index.ts
+  - web/src/lib/components/ui/alert-dialog/index.ts
+  - web/src/lib/components/ui/avatar/index.ts
+  - web/src/lib/components/ui/badge/index.ts
+  - web/src/lib/components/ui/breadcrumb/index.ts
+  - web/src/lib/components/ui/button/index.ts
+  - web/src/lib/components/ui/button-group/index.ts
+  - web/src/lib/components/ui/card/index.ts
+  - web/src/lib/components/ui/chart/chart-utils.ts
+  - web/src/lib/components/ui/chart/index.ts
+  - web/src/lib/components/ui/checkbox/index.ts
+  - web/src/lib/components/ui/collapsible/index.ts
+  - web/src/lib/components/ui/command/index.ts
+  - web/src/lib/components/ui/context-menu/index.ts
+  - web/src/lib/components/ui/dialog/index.ts
+  - web/src/lib/components/ui/drawer/index.ts
+  - web/src/lib/components/ui/dropdown-menu/index.ts
+  - web/src/lib/components/ui/empty/index.ts
+  - web/src/lib/components/ui/input/index.ts
+  - web/src/lib/components/ui/input-group/index.ts
+  - web/src/lib/components/ui/label/index.ts
+  - web/src/lib/components/ui/pagination/index.ts
+  - web/src/lib/components/ui/select/index.ts
+  - web/src/lib/components/ui/separator/index.ts
+  - web/src/lib/components/ui/sheet/index.ts
+  - web/src/lib/components/ui/sidebar/constants.ts
+  - web/src/lib/components/ui/sidebar/context.svelte.ts
+  - web/src/lib/components/ui/sidebar/index.ts
+  - web/src/lib/components/ui/skeleton/index.ts
+  - web/src/lib/components/ui/slider/index.ts
+  - web/src/lib/components/ui/sonner/index.ts
+  - web/src/lib/components/ui/spinner/index.ts
+  - web/src/lib/components/ui/switch/index.ts
+  - web/src/lib/components/ui/table/index.ts
+  - web/src/lib/components/ui/tabs/index.ts
+  - web/src/lib/components/ui/textarea/index.ts
+  - web/src/lib/components/ui/toggle/index.ts
+  - web/src/lib/components/ui/toggle-group/index.ts
+  - web/src/lib/components/ui/tooltip/index.ts
+  - web/src/lib/hooks/is-mobile.svelte.ts
+  - web/src/lib/utils.ts
+  - web/src/routes/layout.css
+  - web/src/routes/page.svelte.spec.ts
+  - web/vite.config.ts
 tags:
   - libsql
   - otel
@@ -489,3 +636,19 @@ This is a foundational milestone with well-defined requirements. The main comple
 - **Integration tests**: Full job lifecycle with real database file
 - **Concurrency tests**: Multiple workers claiming jobs simultaneously
 - **Failure tests**: Worker crash simulation, database disconnect handling
+
+Implemented tasks 1-4 by turning the backend into a Cargo workspace and adding the initial core library. Created workspace manifest at server/Cargo.toml with shared dependencies and split crates into ashford-core (library) and ashford-server (binary), moving the old main into crates/ashford-server/src/main.rs and adding server/.gitignore to ignore Cargo targets. Added ashford-core with config.rs providing typed config structures (AppConfig, PathsConfig, TelemetryConfig, ModelConfig, DiscordConfig, GmailConfig, ImapConfig, PolicyConfig) plus Config::load to read TOML via the config crate, apply env overrides (APP_PORT, OTLP_ENDPOINT, MODEL, DISCORD_BOT_TOKEN), resolve env: indirections, and expand ~ in the database path. Built db.rs with Database wrapper around libsql using Builder::new_local/new_remote, enabling PRAGMA foreign_keys and exposing connection/health_check helpers with custom DbError. Added migrations.rs to run embedded SQL migrations with schema_migrations tracking and execute the first embedded migration. Authored migrations/001_initial.sql containing all 14 tables and indexes from docs/data_model.md in dependency order (accounts → threads → messages → decisions → actions → action_links → jobs → job_steps → discord_whitelist → deterministic_rules → llm_rules → directions → rules_chat_sessions → rules_chat_messages). Updated Cargo.lock accordingly. The binary currently stubs tokio main as a placeholder.
+
+Implemented reviewer fixes for Milestone 1 skeleton queue: Config now resolves env: markers for paths.database before tilde expansion to honor DATABASE_PATH indirection; updated load_config test to use DB_PATH env with HOME override (crates/ashford-core/src/config.rs). Database::new now requires a non-empty LIBSQL_AUTH_TOKEN for remote libsql/turso URLs and fails fast instead of sending an empty token; added env-guarded test remote_missing_auth_token_errors using a mutex to avoid cross-test env races (crates/ashford-core/src/db.rs). Migrations now run per-version inside a transaction, inserting schema_migrations entries in the same transaction with ISO-8601 UTC timestamps via strftime('%Y-%m-%dT%H:%M:%SZ','now'); introduced apply_migrations helper, ISO timestamp test, and a rollback test that injects an invalid migration to confirm no partial schema or version recording on failure (crates/ashford-core/src/migrations.rs). Ran cargo test (workspace) successfully.
+
+Implemented Tasks 5 and 6 (structured logging and OpenTelemetry setup). Added workspace dependencies for tracing, opentelemetry (0.31) and chrono; updated crate manifests accordingly. Created new module crates/ashford-core/src/telemetry.rs providing init_telemetry and init_logging entry points that configure EnvFilter via RUST_LOG, choose pretty output for dev vs JSON formatter with trace_id field for prod, and initialize OTLP tracing when configured. OTLP exporter uses HTTP endpoint with resource attributes (service name/version, deployment env, host arch, OS) and installs TraceContext propagator; TelemetryGuard shuts down the provider on drop. Custom JsonTraceFormatter adds timestamp, level, target, span name, trace_id, and event fields to JSON logs. Added unit test ensuring telemetry initialization is idempotent and graceful without an OTLP endpoint. Exposed telemetry items from lib.rs and integrated logging in the server binary (crates/ashford-server/src/main.rs) so tracing starts at startup. Cleaned Drop handling, ensured PRAGMAs unaffected, and ran cargo test (workspace) successfully to validate changes.
+
+Addressed reviewer issues around structured logging/OpenTelemetry initialization. Reworked server/crates/ashford-core/src/telemetry.rs so the EnvFilter is the outermost layer and wrapped the OTLP exporter in a reload::Layer. That lets a later init_telemetry call add the OTLP layer even if init_logging already installed the subscriber, keeping RUST_LOG filtering for both the formatter and exporter. build_tracer now returns an Arc<SdkTracerProvider> and TelemetryGuard stores a global owned guard in a mutex; the guard returned to callers no longer shuts down the provider if dropped, while the global guard flushes on process teardown. Guard creation now happens only after successfully setting the global subscriber to avoid suppressing retries when set_global_default fails. Cargo uses the existing tracing-subscriber feature set (reload module is used directly) and workspace tests still pass via cargo test --workspace. Tasks: review fixes for structured logging (Task 5) and OpenTelemetry setup (Task 6); integration points remain init_logging delegating to init_telemetry with the OTLP layer updated through the reload handle.
+
+Implemented tasks 7-11 by adding a full job queue and worker plus HTTP health wiring. Created  with Job/JobState models, JobQueue APIs (enqueue, claim_next atomic UPDATE…RETURNING, heartbeat, complete/fail with exponential backoff + jitter capped at 5m, cancel), idempotency handling, step tracking, and JobContext helpers; uses UUID ids, RFC3339 timestamps, and retry scheduling via not_before. Added  with WorkerConfig defaults (1s poll, 30s heartbeat), NoopExecutor, JobExecutor trait, and run_worker loop that claims jobs, spawns heartbeat child tokens, catches panics via FutureExt::catch_unwind, and completes/fails jobs with retry awareness. Updated  to wrap libsql::Database in Arc for cloning; exported new modules in lib.rs and pulled in new workspace deps (uuid, rand, async-trait, tokio-util, futures). Extended server main to load config, init telemetry, open DB, run migrations, spawn worker, and serve axum router with  returning status/version/database and graceful shutdown via CancellationToken; added health test. Queue tests now use file-backed temp DB plus migrations and cover enqueue/claim, idempotency dedupe, retry scheduling, max attempts, step recording, and concurrent claim safety. Cargo.lock updated and cargo test --workspace passes.
+
+Implemented tasks 7-11 by adding a full job queue and worker plus HTTP health wiring. Created crates/ashford-core/src/queue.rs with Job/JobState models, JobQueue APIs (enqueue, claim_next atomic UPDATE...RETURNING, heartbeat, complete/fail with exponential backoff + jitter capped at 5m, cancel), idempotency handling, step tracking, and JobContext helpers; uses UUID ids, RFC3339 timestamps, and retry scheduling via not_before. Added crates/ashford-core/src/worker.rs with WorkerConfig defaults (1s poll, 30s heartbeat), NoopExecutor, JobExecutor trait, and run_worker loop that claims jobs, spawns heartbeat child tokens, catches panics via FutureExt::catch_unwind, and completes/fails jobs with retry awareness. Updated db.rs to wrap libsql::Database in Arc for cloning; exported new modules in lib.rs and pulled in new workspace deps (uuid, rand, async-trait, tokio-util, futures). Extended server main to load config, init telemetry, open DB, run migrations, spawn worker, and serve axum router with /healthz returning status/version/database and graceful shutdown via CancellationToken; added health test. Queue tests now use file-backed temp DB plus migrations and cover enqueue/claim, idempotency dedupe, retry scheduling, max attempts, step recording, and concurrent claim safety. Cargo.lock updated and cargo test --workspace passes.
+
+Added job completion metadata and cancellation safety across queue/worker. Introduced migration 002_add_job_completion_fields.sql adding jobs.finished_at and jobs.result_json and registered it in crates/ashford-core/src/migrations.rs so run_migrations applies it. Extended queue Job model (crates/ashford-core/src/queue.rs) with finished_at/result fields and updated JOB_COLUMNS, enqueue/claim selects, row_to_job parsing, and resolve_missing_state helper. JobQueue::complete now records finished_at/result_json and only updates running jobs; JobQueue::fail conditionally stamps finished_at on terminal failures and also requires running state; cancel now targets queued/running jobs, stamps finished_at, and returns NotRunning when job already terminal. Worker handling (crates/ashford-core/src/worker.rs) gained finalize_job with retries/backoff and cancellation awareness, preserving heartbeats until persistence succeeds; it skips finalization when jobs are canceled and treats NotRunning as benign, preventing canceled jobs from being overwritten. All workspace tests pass after cargo test --workspace on 2025-11-29.
+
+Handled transient DB errors during job finalization (Task 9: queue worker loop robustness). Updated server/crates/ashford-core/src/worker.rs finalize_job to wrap fetch_job in the same bounded backoff/heartbeat-aware retry loop used for persistence errors, so transient database outages no longer cause an early return that strands running jobs after the heartbeat task stops. Kept cancellation-aware semantics (skip when canceled, treat NotRunning as benign) and left the rest of the worker flow unchanged. Verified correctness with cargo test --workspace.
