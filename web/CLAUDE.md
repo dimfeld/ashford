@@ -12,10 +12,9 @@
 ### Remote Query Functions
 
 - See docs/svelte_remote_functions.md for guidelines on using forms and remote functions in Svelte.
-- SvelteKit now supports its own RPC layer with query functions in *.remote.ts files.
+- SvelteKit now supports its own RPC layer with query functions in \*.remote.ts files.
 - Remove functions can be transparently imported and called on the client, but always run on the server.
 - Import these helpers directly and call them inside components or server files. SvelteKit transparently makes calls from the client work.
-
 
 ### Svelte Runes Guidelines
 
