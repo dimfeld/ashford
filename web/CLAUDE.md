@@ -1,9 +1,7 @@
-
 ## General Code Guidance
 
 - Do not use `any` in Typescript code, except in tests. It defeats the purpose of Typescript. If you actually don't know the type of something, use `unknown` instead.
 - Comments in code should describe the current state of the code, but not how you changed it from before.
-
 
 ### SvelteKit
 
@@ -32,15 +30,14 @@
   const selectedItem = $derived(items.find((i) => i.id === selectedId));
   // Good - use $derived.by for complex logic
   const processedData = $derived.by(() => {
-    const filtered = data.filter((item) => item.visible);
-    const sorted = filtered.sort((a, b) => a.name.localeCompare(b.name));
-    return sorted.map((item) => ({
-      ...item,
-      displayName: `${item.name} (${item.count})`,
-    }));
+  	const filtered = data.filter((item) => item.visible);
+  	const sorted = filtered.sort((a, b) => a.name.localeCompare(b.name));
+  	return sorted.map((item) => ({
+  		...item,
+  		displayName: `${item.name} (${item.count})`
+  	}));
   });
   ```
 
 `const value = $derived(() => { logic })` is WRONG. You must never put a function in `$derived`, use a simple expression
 or `$derived.by` instead.
-
