@@ -1,0 +1,16 @@
+paths:
+  tasks: tasks
+defaultExecutor: claude-code
+postApplyCommands:
+  - title: Format JS code
+    command: pnpm run format
+    workingDirectory: web
+    allowFailure: true
+    hideOutputOnSuccess: true
+  - title: Format Rust code
+    command: cargo fmt
+    workingDirectory: server
+    allowFailure: true
+    hideOutputOnSuccess: true
+prCreation:
+  draft: true
