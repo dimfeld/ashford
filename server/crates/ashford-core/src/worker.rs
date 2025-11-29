@@ -1,4 +1,5 @@
 use std::panic::AssertUnwindSafe;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -16,6 +17,8 @@ use crate::queue::{Job, JobContext, JobQueue, JobState, QueueError};
 pub struct WorkerConfig {
     pub poll_interval: Duration,
     pub heartbeat_interval: Duration,
+    /// Maximum time to wait for in-flight jobs during graceful shutdown
+    pub drain_timeout: Duration,
 }
 
 impl Default for WorkerConfig {
@@ -23,6 +26,7 @@ impl Default for WorkerConfig {
         Self {
             poll_interval: Duration::from_secs(1),
             heartbeat_interval: Duration::from_secs(30),
+            drain_timeout: Duration::from_secs(30),
         }
     }
 }
@@ -81,21 +85,49 @@ pub async fn run_worker<E: JobExecutor>(
     shutdown: CancellationToken,
 ) {
     let executor = Arc::new(executor);
+    let in_flight = Arc::new(AtomicUsize::new(0));
+    let hard_shutdown = CancellationToken::new();
+
+    // Spawn drain timeout watcher - triggers hard shutdown after drain_timeout
+    let drain_handle = {
+        let shutdown = shutdown.clone();
+        let hard_shutdown = hard_shutdown.clone();
+        let drain_timeout = config.drain_timeout;
+        tokio::spawn(async move {
+            shutdown.cancelled().await;
+            info!("graceful shutdown initiated, waiting for in-flight jobs");
+            tokio::time::sleep(drain_timeout).await;
+            warn!("drain timeout exceeded, initiating hard shutdown");
+            hard_shutdown.cancel();
+        })
+    };
+
     loop {
         if shutdown.is_cancelled() {
-            break;
+            // Graceful shutdown: stop accepting new jobs, wait for in-flight to complete
+            if in_flight.load(Ordering::SeqCst) == 0 {
+                break;
+            }
+            tokio::select! {
+                _ = hard_shutdown.cancelled() => break,
+                _ = tokio::time::sleep(Duration::from_millis(100)) => continue,
+            }
         }
 
         match queue.claim_next().await {
             Ok(Some(job)) => {
+                in_flight.fetch_add(1, Ordering::SeqCst);
+
                 handle_job(
                     queue.clone(),
                     executor.clone(),
                     config,
-                    shutdown.clone(),
+                    hard_shutdown.clone(),
                     job,
                 )
-                .await
+                .await;
+
+                in_flight.fetch_sub(1, Ordering::SeqCst);
             }
             Ok(None) => sleep(config.poll_interval).await,
             Err(err) => {
@@ -104,6 +136,9 @@ pub async fn run_worker<E: JobExecutor>(
             }
         }
     }
+
+    drain_handle.abort();
+    info!("worker shutdown complete");
 }
 
 #[cfg(test)]
@@ -127,6 +162,7 @@ mod tests {
         WorkerConfig {
             poll_interval: Duration::from_millis(5),
             heartbeat_interval: Duration::from_millis(10),
+            drain_timeout: Duration::from_secs(5),
         }
     }
 
@@ -304,17 +340,203 @@ mod tests {
         assert!(job.last_error.unwrap().contains("panic"));
         assert!(job.not_before.is_some());
     }
+
+    struct SlowExecutor {
+        delay: Duration,
+    }
+
+    #[async_trait]
+    impl JobExecutor for SlowExecutor {
+        async fn execute(&self, _job: Job, _ctx: JobContext) -> Result<(), JobError> {
+            sleep(self.delay).await;
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn worker_completes_job_during_graceful_shutdown() {
+        let (queue, _dir) = setup_queue().await;
+        let job_id = queue
+            .enqueue("slow", json!({}), None, 0)
+            .await
+            .expect("enqueue");
+
+        let mut config = fast_config();
+        config.drain_timeout = Duration::from_secs(5);
+
+        let shutdown = CancellationToken::new();
+        let worker = tokio::spawn(run_worker(
+            queue.clone(),
+            SlowExecutor {
+                delay: Duration::from_millis(100),
+            },
+            config,
+            shutdown.clone(),
+        ));
+
+        // Wait for job to start running
+        timeout(Duration::from_secs(2), async {
+            loop {
+                let job = queue.fetch_job(&job_id).await.expect("fetch");
+                if matches!(job.state, JobState::Running) {
+                    break;
+                }
+                sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("job should start running");
+
+        // Trigger graceful shutdown while job is running
+        shutdown.cancel();
+
+        // Worker should complete the job before exiting
+        let _ = timeout(Duration::from_secs(2), worker)
+            .await
+            .expect("worker should exit within timeout");
+
+        let job = queue.fetch_job(&job_id).await.expect("fetch final");
+        assert!(
+            matches!(job.state, JobState::Completed),
+            "job should be completed during graceful shutdown, got {:?}",
+            job.state
+        );
+    }
+
+    #[tokio::test]
+    async fn worker_exits_after_drain_timeout() {
+        // This test verifies that hard shutdown abandons finalization.
+        // Note: Job execution itself isn't interrupted - jobs should implement
+        // their own cancellation logic if needed. This test uses a fast executor
+        // but simulates slow finalization by testing the shutdown path.
+        let (queue, _dir) = setup_queue().await;
+        let job_id = queue
+            .enqueue("test", json!({}), None, 0)
+            .await
+            .expect("enqueue");
+
+        let mut config = fast_config();
+        // Very short drain timeout
+        config.drain_timeout = Duration::from_millis(50);
+
+        let shutdown = CancellationToken::new();
+        let worker = tokio::spawn(run_worker(
+            queue.clone(),
+            SlowExecutor {
+                delay: Duration::from_millis(200), // Longer than drain timeout but reasonable
+            },
+            config,
+            shutdown.clone(),
+        ));
+
+        // Wait for job to start running
+        timeout(Duration::from_secs(2), async {
+            loop {
+                let job = queue.fetch_job(&job_id).await.expect("fetch");
+                if matches!(job.state, JobState::Running) {
+                    break;
+                }
+                sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("job should start running");
+
+        // Trigger shutdown immediately
+        shutdown.cancel();
+
+        // Worker should eventually exit. The job execution (200ms) will complete,
+        // but by then hard_shutdown has fired (after 50ms), so finalization
+        // will be abandoned.
+        let _ = timeout(Duration::from_millis(500), worker)
+            .await
+            .expect("worker should exit after job completes");
+
+        // Job should still be in running state since finalization was abandoned
+        // due to hard shutdown firing before the job finished.
+        let job = queue.fetch_job(&job_id).await.expect("fetch final");
+        assert!(
+            matches!(job.state, JobState::Running),
+            "job should still be running after hard shutdown abandoned finalization, got {:?}",
+            job.state
+        );
+    }
+
+    #[tokio::test]
+    async fn worker_stops_claiming_new_jobs_during_shutdown() {
+        let (queue, _dir) = setup_queue().await;
+
+        // Enqueue two jobs
+        let job1_id = queue
+            .enqueue("job1", json!({}), None, 0)
+            .await
+            .expect("enqueue job1");
+        let job2_id = queue
+            .enqueue("job2", json!({}), None, 0)
+            .await
+            .expect("enqueue job2");
+
+        let mut config = fast_config();
+        config.drain_timeout = Duration::from_secs(5);
+
+        let shutdown = CancellationToken::new();
+        let worker = tokio::spawn(run_worker(
+            queue.clone(),
+            SlowExecutor {
+                delay: Duration::from_millis(100),
+            },
+            config,
+            shutdown.clone(),
+        ));
+
+        // Wait for first job to start running
+        timeout(Duration::from_secs(2), async {
+            loop {
+                let job = queue.fetch_job(&job1_id).await.expect("fetch");
+                if matches!(job.state, JobState::Running) {
+                    break;
+                }
+                sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("job1 should start running");
+
+        // Trigger shutdown while first job is running
+        shutdown.cancel();
+
+        // Wait for worker to exit
+        let _ = timeout(Duration::from_secs(2), worker)
+            .await
+            .expect("worker should exit");
+
+        // First job should be completed
+        let job1 = queue.fetch_job(&job1_id).await.expect("fetch job1");
+        assert!(
+            matches!(job1.state, JobState::Completed),
+            "job1 should be completed, got {:?}",
+            job1.state
+        );
+
+        // Second job should still be queued (not claimed during shutdown)
+        let job2 = queue.fetch_job(&job2_id).await.expect("fetch job2");
+        assert!(
+            matches!(job2.state, JobState::Queued),
+            "job2 should remain queued during shutdown, got {:?}",
+            job2.state
+        );
+    }
 }
 
 async fn handle_job<E: JobExecutor>(
     queue: JobQueue,
     executor: Arc<E>,
     config: WorkerConfig,
-    shutdown: CancellationToken,
+    hard_shutdown: CancellationToken,
     job: Job,
 ) {
     info!(job_id = %job.id, job_type = %job.job_type, "processing job");
-    let heartbeat_cancel = shutdown.child_token();
+    let heartbeat_cancel = hard_shutdown.child_token();
     let heartbeat_queue = queue.clone();
     let job_id = job.id.clone();
     let heartbeat_interval = config.heartbeat_interval;
@@ -368,7 +590,7 @@ async fn handle_job<E: JobExecutor>(
         finalize,
         &heartbeat_cancel,
         heartbeat_interval,
-        shutdown,
+        hard_shutdown,
     )
     .await
     {
@@ -390,12 +612,13 @@ async fn finalize_job(
     action: FinalizeAction,
     heartbeat_cancel: &CancellationToken,
     heartbeat_interval: Duration,
-    shutdown: CancellationToken,
+    hard_shutdown: CancellationToken,
 ) -> Result<(), QueueError> {
     let mut attempt: u32 = 0;
 
     loop {
-        if shutdown.is_cancelled() {
+        if hard_shutdown.is_cancelled() {
+            warn!(job_id = %job.id, "hard shutdown: abandoning finalization");
             return Ok(());
         }
 
@@ -413,7 +636,10 @@ async fn finalize_job(
                 warn!(job_id = %job.id, attempt, error = %err, "failed to fetch job for finalize; retrying");
 
                 tokio::select! {
-                    _ = shutdown.cancelled() => return Ok(()),
+                    _ = hard_shutdown.cancelled() => {
+                        warn!(job_id = %job.id, "hard shutdown: abandoning finalization");
+                        return Ok(());
+                    },
                     _ = sleep(backoff) => {},
                     _ = heartbeat_cancel.cancelled() => return Err(err),
                 }
@@ -463,7 +689,10 @@ async fn finalize_job(
 
                 // Keep heartbeat alive while retrying to avoid stale running jobs.
                 tokio::select! {
-                    _ = shutdown.cancelled() => return Ok(()),
+                    _ = hard_shutdown.cancelled() => {
+                        warn!(job_id = %job.id, "hard shutdown: abandoning finalization");
+                        return Ok(());
+                    },
                     _ = sleep(backoff) => {},
                     _ = heartbeat_cancel.cancelled() => return Err(err),
                 }

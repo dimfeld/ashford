@@ -28,7 +28,6 @@ some other piece of work that needs to be done but isn't in scope, add it as a n
 - Mocking the backend is ok in frontend tests, but should be done only after careful consideration
 - Prefer regular for loops over `it.each` for table-driven tests
 - Use vi.waitFor any time an assertion may not be immediately met.
-- Tests should not use `console` functions since it adds clutter to test output. You can use the `debug` module instead.
 - If you get errors about a local monorepo package not found, run `pnpm install` to ensure everything is linked up properly.
 - If you run into errors about tests not recognizing Svelte syntax, check if you may have deleted vite.config.ts.
 - For full integration tests (database → load function → component rendering), see `docs/inbox-unit-test-tutorial.md` section "Full Integration Testing"
