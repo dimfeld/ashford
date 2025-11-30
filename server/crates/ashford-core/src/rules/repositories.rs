@@ -862,6 +862,162 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn deterministic_rule_list_enabled_by_scope_sender_and_domain() {
+        let (db, _dir) = setup_db().await;
+        let repo = DeterministicRuleRepository::new(db.clone());
+
+        // Create rules for different scopes
+        repo.create(sample_new_det_rule(RuleScope::Global, None))
+            .await
+            .expect("create global");
+
+        repo.create(sample_new_det_rule(RuleScope::Sender, Some("alice@example.com")))
+            .await
+            .expect("create sender alice");
+
+        repo.create(sample_new_det_rule(RuleScope::Sender, Some("bob@example.com")))
+            .await
+            .expect("create sender bob");
+
+        repo.create(sample_new_det_rule(RuleScope::Domain, Some("example.com")))
+            .await
+            .expect("create domain example.com");
+
+        repo.create(sample_new_det_rule(RuleScope::Domain, Some("other.org")))
+            .await
+            .expect("create domain other.org");
+
+        // Create a disabled sender rule to verify enabled filtering
+        let mut disabled_sender = sample_new_det_rule(RuleScope::Sender, Some("disabled@example.com"));
+        disabled_sender.enabled = false;
+        repo.create(disabled_sender).await.expect("create disabled sender");
+
+        // Test Sender scope filtering
+        let sender_alice = repo
+            .list_enabled_by_scope(RuleScope::Sender, Some("alice@example.com"))
+            .await
+            .expect("list sender alice");
+        assert_eq!(sender_alice.len(), 1);
+        assert_eq!(sender_alice[0].scope, RuleScope::Sender);
+        assert_eq!(sender_alice[0].scope_ref.as_deref(), Some("alice@example.com"));
+
+        let sender_bob = repo
+            .list_enabled_by_scope(RuleScope::Sender, Some("bob@example.com"))
+            .await
+            .expect("list sender bob");
+        assert_eq!(sender_bob.len(), 1);
+        assert_eq!(sender_bob[0].scope_ref.as_deref(), Some("bob@example.com"));
+
+        // Verify disabled sender is not returned
+        let sender_disabled = repo
+            .list_enabled_by_scope(RuleScope::Sender, Some("disabled@example.com"))
+            .await
+            .expect("list disabled sender");
+        assert_eq!(sender_disabled.len(), 0);
+
+        // Test Domain scope filtering
+        let domain_example = repo
+            .list_enabled_by_scope(RuleScope::Domain, Some("example.com"))
+            .await
+            .expect("list domain example.com");
+        assert_eq!(domain_example.len(), 1);
+        assert_eq!(domain_example[0].scope, RuleScope::Domain);
+        assert_eq!(domain_example[0].scope_ref.as_deref(), Some("example.com"));
+
+        let domain_other = repo
+            .list_enabled_by_scope(RuleScope::Domain, Some("other.org"))
+            .await
+            .expect("list domain other.org");
+        assert_eq!(domain_other.len(), 1);
+        assert_eq!(domain_other[0].scope_ref.as_deref(), Some("other.org"));
+
+        // Verify non-existent scope_ref returns empty
+        let domain_nonexistent = repo
+            .list_enabled_by_scope(RuleScope::Domain, Some("nonexistent.net"))
+            .await
+            .expect("list nonexistent domain");
+        assert_eq!(domain_nonexistent.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn llm_rule_list_enabled_by_scope_sender_and_domain() {
+        let (db, _dir) = setup_db().await;
+        let repo = LlmRuleRepository::new(db.clone());
+
+        // Create rules for different scopes
+        repo.create(sample_new_llm_rule(RuleScope::Global, None))
+            .await
+            .expect("create global");
+
+        repo.create(sample_new_llm_rule(RuleScope::Sender, Some("alice@example.com")))
+            .await
+            .expect("create sender alice");
+
+        repo.create(sample_new_llm_rule(RuleScope::Sender, Some("bob@example.com")))
+            .await
+            .expect("create sender bob");
+
+        repo.create(sample_new_llm_rule(RuleScope::Domain, Some("example.com")))
+            .await
+            .expect("create domain example.com");
+
+        repo.create(sample_new_llm_rule(RuleScope::Domain, Some("other.org")))
+            .await
+            .expect("create domain other.org");
+
+        // Create a disabled sender rule to verify enabled filtering
+        let mut disabled_sender = sample_new_llm_rule(RuleScope::Sender, Some("disabled@example.com"));
+        disabled_sender.enabled = false;
+        repo.create(disabled_sender).await.expect("create disabled sender");
+
+        // Test Sender scope filtering
+        let sender_alice = repo
+            .list_enabled_by_scope(RuleScope::Sender, Some("alice@example.com"))
+            .await
+            .expect("list sender alice");
+        assert_eq!(sender_alice.len(), 1);
+        assert_eq!(sender_alice[0].scope, RuleScope::Sender);
+        assert_eq!(sender_alice[0].scope_ref.as_deref(), Some("alice@example.com"));
+
+        let sender_bob = repo
+            .list_enabled_by_scope(RuleScope::Sender, Some("bob@example.com"))
+            .await
+            .expect("list sender bob");
+        assert_eq!(sender_bob.len(), 1);
+        assert_eq!(sender_bob[0].scope_ref.as_deref(), Some("bob@example.com"));
+
+        // Verify disabled sender is not returned
+        let sender_disabled = repo
+            .list_enabled_by_scope(RuleScope::Sender, Some("disabled@example.com"))
+            .await
+            .expect("list disabled sender");
+        assert_eq!(sender_disabled.len(), 0);
+
+        // Test Domain scope filtering
+        let domain_example = repo
+            .list_enabled_by_scope(RuleScope::Domain, Some("example.com"))
+            .await
+            .expect("list domain example.com");
+        assert_eq!(domain_example.len(), 1);
+        assert_eq!(domain_example[0].scope, RuleScope::Domain);
+        assert_eq!(domain_example[0].scope_ref.as_deref(), Some("example.com"));
+
+        let domain_other = repo
+            .list_enabled_by_scope(RuleScope::Domain, Some("other.org"))
+            .await
+            .expect("list domain other.org");
+        assert_eq!(domain_other.len(), 1);
+        assert_eq!(domain_other[0].scope_ref.as_deref(), Some("other.org"));
+
+        // Verify non-existent scope_ref returns empty
+        let domain_nonexistent = repo
+            .list_enabled_by_scope(RuleScope::Domain, Some("nonexistent.net"))
+            .await
+            .expect("list nonexistent domain");
+        assert_eq!(domain_nonexistent.len(), 0);
+    }
+
+    #[tokio::test]
     async fn directions_crud_and_enabled_filter() {
         let (db, _dir) = setup_db().await;
         let repo = DirectionsRepository::new(db);

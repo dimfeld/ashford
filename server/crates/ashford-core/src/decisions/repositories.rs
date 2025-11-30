@@ -306,17 +306,21 @@ impl ActionRepository {
         Ok(actions)
     }
 
-    pub async fn list_by_status(&self, status: ActionStatus) -> Result<Vec<Action>, ActionError> {
+    pub async fn list_by_status(
+        &self,
+        account_id: &str,
+        status: ActionStatus,
+    ) -> Result<Vec<Action>, ActionError> {
         let conn = self.db.connection().await?;
         let mut rows = conn
             .query(
                 &format!(
                     "SELECT {ACTION_COLUMNS}
                      FROM actions
-                     WHERE status = ?1
+                     WHERE account_id = ?1 AND status = ?2
                      ORDER BY created_at"
                 ),
-                params![status.as_str()],
+                params![account_id, status.as_str()],
             )
             .await?;
 
@@ -839,7 +843,7 @@ mod tests {
         assert_eq!(by_decision.len(), 2);
 
         let queued = repo
-            .list_by_status(ActionStatus::Queued)
+            .list_by_status(&account_id, ActionStatus::Queued)
             .await
             .expect("queued");
         assert_eq!(queued.len(), 1);
@@ -1094,6 +1098,79 @@ mod tests {
             .await
             .expect_err("completed should be rejected");
         assert!(matches!(err, ActionError::InvalidInitialStatus(_)));
+    }
+
+    #[tokio::test]
+    async fn action_list_by_status_isolates_by_account() {
+        let (db, _dir) = setup_db().await;
+
+        // Create two separate accounts
+        let account1_id = seed_account_with_email(&db, "user1@example.com").await;
+        let account2_id = seed_account_with_email(&db, "user2@example.com").await;
+
+        // Create threads and messages for each account
+        let thread1 = seed_thread(&db, &account1_id, "t1").await;
+        let message1 = seed_message(&db, &account1_id, &thread1, "m1").await;
+        let thread2 = seed_thread(&db, &account2_id, "t2").await;
+        let message2 = seed_message(&db, &account2_id, &thread2, "m2").await;
+
+        // Create decisions for each account
+        let decisions = DecisionRepository::new(db.clone());
+        let decision1 = decisions
+            .create(sample_new_decision(&account1_id, &message1))
+            .await
+            .expect("decision1");
+        let decision2 = decisions
+            .create(sample_new_decision(&account2_id, &message2))
+            .await
+            .expect("decision2");
+
+        let repo = ActionRepository::new(db.clone());
+
+        // Create queued actions for both accounts
+        let action1 = repo
+            .create(sample_new_action(
+                &account1_id,
+                &message1,
+                Some(&decision1.id),
+                ActionStatus::Queued,
+            ))
+            .await
+            .expect("action1");
+        let action2 = repo
+            .create(sample_new_action(
+                &account2_id,
+                &message2,
+                Some(&decision2.id),
+                ActionStatus::Queued,
+            ))
+            .await
+            .expect("action2");
+
+        // list_by_status for account1 should only return action1
+        let account1_queued = repo
+            .list_by_status(&account1_id, ActionStatus::Queued)
+            .await
+            .expect("account1 queued");
+        assert_eq!(account1_queued.len(), 1);
+        assert_eq!(account1_queued[0].id, action1.id);
+        assert_eq!(account1_queued[0].account_id, account1_id);
+
+        // list_by_status for account2 should only return action2
+        let account2_queued = repo
+            .list_by_status(&account2_id, ActionStatus::Queued)
+            .await
+            .expect("account2 queued");
+        assert_eq!(account2_queued.len(), 1);
+        assert_eq!(account2_queued[0].id, action2.id);
+        assert_eq!(account2_queued[0].account_id, account2_id);
+
+        // Querying for a non-existent account should return empty
+        let empty = repo
+            .list_by_status("nonexistent-account", ActionStatus::Queued)
+            .await
+            .expect("empty");
+        assert!(empty.is_empty());
     }
 
     #[tokio::test]

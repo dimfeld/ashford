@@ -21,7 +21,7 @@ docs:
 planGeneratedAt: 2025-11-30T01:24:24.156Z
 promptsGeneratedAt: 2025-11-30T01:24:24.156Z
 createdAt: 2025-11-30T01:14:18.743Z
-updatedAt: 2025-11-30T02:06:15.923Z
+updatedAt: 2025-11-30T07:05:58.650Z
 progressNotes:
   - timestamp: 2025-11-30T01:29:45.557Z
     text: Created rules module with types/enums and repository implementations for
@@ -47,6 +47,26 @@ progressNotes:
       verified constraints reject invalid enum strings. cargo test -p
       ashford-core now 121 tests passing.
     source: "tester: tasks5-11"
+  - timestamp: 2025-11-30T03:14:52.820Z
+    text: Code review completed. Found 0 critical issues, 2 minor issues. All tests
+      pass (122), no compilation warnings. Implementation follows existing
+      patterns correctly. Status transition validation and initial status
+      validation are properly implemented. Foreign key relationships respected.
+      JSON round-tripping works correctly.
+    source: "reviewer: task 1-11"
+  - timestamp: 2025-11-30T07:03:29.718Z
+    text: Fixed list_by_status in ActionRepository to require account_id parameter
+      for multi-tenant consistency. Updated the SQL query to filter by
+      account_id and status, and updated the test that calls this method to pass
+      the account_id. All 122 tests pass.
+    source: "implementer: autofix issue 1"
+  - timestamp: 2025-11-30T07:04:41.672Z
+    text: Added test action_list_by_status_isolates_by_account to verify account
+      scoping in list_by_status method. Test creates actions in two separate
+      accounts with same status, then verifies that querying each account only
+      returns that account's actions and querying a non-existent account returns
+      empty. All 123 tests pass.
+    source: "tester: Issue 1 fix verification"
 tasks:
   - title: Create rules module structure and shared types
     done: true
@@ -634,3 +654,5 @@ Implemented rules data access layer (Tasks 1-4 & 9). Added new rules module with
 Implemented Task 5 (decisions module types), Task 6 (Decision repository), Task 7 (Action repository), Task 8 (ActionLink repository), Task 10 (tests), and Task 11 (exports/build). Added new module at server/crates/ashford-core/src/decisions with mod.rs, types.rs, and repositories.rs. types.rs defines DecisionSource, ActionStatus, ActionLinkRelationType enums with as_str/from_str plus domain structs Decision, NewDecision, Action, NewAction, ActionLink, NewActionLink. repositories.rs implements DecisionRepository (create/get_by_id/get_by_message_id/list_by_account/list_recent) with JSON serialization and RFC3339 timestamps; ActionRepository (create/get/list, status update helpers, transition validation allowing queued→executing/completed/failed, etc., with mark_executing/mark_completed/mark_failed convenience); ActionLinkRepository CRUD. Added row parsing helpers with enum validation and error enums mirroring existing patterns. Tests in repositories.rs seed accounts/threads/messages using existing repos, cover CRUD paths, status transitions (including invalid transitions), failure updates, and action link relationships. Updated lib.rs to expose decisions module types/repositories/errors. Ran cargo fmt and cargo test -p ashford-core (all 117 tests now pass).
 
 Addressed reviewer fixes for tasks 5-11 around the decisions/action repositories. In server/crates/ashford-core/src/decisions/repositories.rs I now validate initial action states via is_valid_initial_status and return a new InvalidInitialStatus error so callers cannot insert completed/failed/rejected actions directly; list_recent now requires an account id and scopes the SQL to that tenant to avoid cross-account leaks. update_status performs an atomic UPDATE ... WHERE status check, preserving optimistic concurrency, and uses COALESCE together with executed_at_to_set to keep the first execution timestamp instead of overwriting it when completing or failing. Added a helper seed_account_with_email plus new tests to cover account-scoped recent listing and rejection of terminal initial states; test suite bumped to 122 cases and cd server && cargo test -p ashford-core passes. These changes integrate with existing repositories via the same Database plumbing and keep ActionRepository public API type-safe while tightening lifecycle invariants.
+
+Fixed Issue 1 from code review: Added account scoping to list_by_status in ActionRepository. Modified the method signature in server/crates/ashford-core/src/decisions/repositories.rs to require an account_id parameter, updated the SQL query to filter by 'WHERE account_id = ?1 AND status = ?2', and updated the existing test to pass the account_id. Added a new comprehensive test 'action_list_by_status_isolates_by_account' that verifies account isolation by creating two separate accounts with actions and confirming that queries for one account do not return actions from another account. This change ensures consistency with the multi-tenant model where list_recent was already scoped to account. All 124 tests now pass.
