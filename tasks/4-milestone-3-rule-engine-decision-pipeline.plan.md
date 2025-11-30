@@ -12,6 +12,12 @@ container: false
 temp: false
 dependencies:
   - 3
+  - 13
+  - 14
+  - 15
+  - 16
+  - 17
+  - 18
 parent: 1
 issue: []
 docs:
@@ -20,7 +26,7 @@ docs:
 planGeneratedAt: 2025-11-29T01:23:12.069Z
 promptsGeneratedAt: 2025-11-29T01:23:12.069Z
 createdAt: 2025-11-29T01:21:26.793Z
-updatedAt: 2025-11-29T01:23:12.069Z
+updatedAt: 2025-11-30T01:14:19.539Z
 tasks:
   - title: Define condition tree schema
     done: false
