@@ -119,10 +119,6 @@ See the `docs/` directory for detailed documentation:
 - [Web UI](docs/web_ui.md) - Frontend specification
 - [Configuration](docs/configuration.md) - All config options
 
-## Development
-
-This project uses [jj (Jujutsu)](https://github.com/martinvonz/jj) for source control and [rmplan](https://github.com/dimfeld/rmplan) for task tracking.
-
 ### Milestones
 
 1. Rust skeleton & queue
