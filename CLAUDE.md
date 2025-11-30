@@ -11,6 +11,14 @@ some other piece of work that needs to be done but isn't in scope, add it as a n
 
 This system is not a substitute for your own Todo tools and planning. You should continue to use your own Todo and/or planning tools to plan and track your work as you go.
 
+## Accounts System
+
+This application currently supports only a single user. Therefore there are no concerns around multi-tenancy, as all
+data belongs to that user.
+
+The accounts system as it exists right now is for a single user who has multiple mail accounts. We should not enforce strict separation between accounts as many operations from a UI perspective will find it useful to look at all accounts at once.
+
+
 ## Dependencies
 
 When adding dependencies, always use `pnpm add` or `cargo add` to make sure you get the latest version of the package.
