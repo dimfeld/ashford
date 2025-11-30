@@ -150,14 +150,14 @@ impl DecisionRepository {
         }
     }
 
-    pub async fn list_by_account(&self, account_id: &str) -> Result<Vec<Decision>, DecisionError> {
+    pub async fn list(&self, account_id: Option<&str>) -> Result<Vec<Decision>, DecisionError> {
         let conn = self.db.connection().await?;
         let mut rows = conn
             .query(
                 &format!(
                     "SELECT {DECISION_COLUMNS}
                      FROM decisions
-                     WHERE account_id = ?1
+                     WHERE (?1 IS NULL OR account_id = ?1)
                      ORDER BY created_at DESC"
                 ),
                 params![account_id],
@@ -171,14 +171,17 @@ impl DecisionRepository {
         Ok(decisions)
     }
 
-    pub async fn list_recent(&self, account_id: &str) -> Result<Vec<Decision>, DecisionError> {
+    pub async fn list_recent(
+        &self,
+        account_id: Option<&str>,
+    ) -> Result<Vec<Decision>, DecisionError> {
         let conn = self.db.connection().await?;
         let mut rows = conn
             .query(
                 &format!(
                     "SELECT {DECISION_COLUMNS}
                      FROM decisions
-                     WHERE account_id = ?1
+                     WHERE (?1 IS NULL OR account_id = ?1)
                      ORDER BY created_at DESC
                      LIMIT ?2"
                 ),
@@ -308,8 +311,8 @@ impl ActionRepository {
 
     pub async fn list_by_status(
         &self,
-        account_id: &str,
         status: ActionStatus,
+        account_id: Option<&str>,
     ) -> Result<Vec<Action>, ActionError> {
         let conn = self.db.connection().await?;
         let mut rows = conn
@@ -317,10 +320,10 @@ impl ActionRepository {
                 &format!(
                     "SELECT {ACTION_COLUMNS}
                      FROM actions
-                     WHERE account_id = ?1 AND status = ?2
+                     WHERE status = ?1 AND (?2 IS NULL OR account_id = ?2)
                      ORDER BY created_at"
                 ),
-                params![account_id, status.as_str()],
+                params![status.as_str(), account_id],
             )
             .await?;
 
@@ -786,18 +789,25 @@ mod tests {
             .expect("create other");
 
         let by_account = repo
-            .list_by_account(&account_id)
+            .list(Some(&account_id))
             .await
             .expect("list by account");
         assert_eq!(by_account.len(), 2);
 
-        let recent = repo.list_recent(&account_id).await.expect("recent");
+        let recent = repo.list_recent(Some(&account_id)).await.expect("recent");
         assert_eq!(recent.len(), 2);
         assert!(
             recent
                 .iter()
                 .all(|decision| decision.account_id == account_id)
         );
+
+        // None should return all decisions across all accounts
+        let all_decisions = repo.list(None).await.expect("list all");
+        assert_eq!(all_decisions.len(), 3);
+
+        let all_recent = repo.list_recent(None).await.expect("recent all");
+        assert_eq!(all_recent.len(), 3);
     }
 
     #[tokio::test]
@@ -843,7 +853,7 @@ mod tests {
         assert_eq!(by_decision.len(), 2);
 
         let queued = repo
-            .list_by_status(&account_id, ActionStatus::Queued)
+            .list_by_status(ActionStatus::Queued, Some(&account_id))
             .await
             .expect("queued");
         assert_eq!(queued.len(), 1);
@@ -1149,7 +1159,7 @@ mod tests {
 
         // list_by_status for account1 should only return action1
         let account1_queued = repo
-            .list_by_status(&account1_id, ActionStatus::Queued)
+            .list_by_status(ActionStatus::Queued, Some(&account1_id))
             .await
             .expect("account1 queued");
         assert_eq!(account1_queued.len(), 1);
@@ -1158,7 +1168,7 @@ mod tests {
 
         // list_by_status for account2 should only return action2
         let account2_queued = repo
-            .list_by_status(&account2_id, ActionStatus::Queued)
+            .list_by_status(ActionStatus::Queued, Some(&account2_id))
             .await
             .expect("account2 queued");
         assert_eq!(account2_queued.len(), 1);
@@ -1167,10 +1177,20 @@ mod tests {
 
         // Querying for a non-existent account should return empty
         let empty = repo
-            .list_by_status("nonexistent-account", ActionStatus::Queued)
+            .list_by_status(ActionStatus::Queued, Some("nonexistent-account"))
             .await
             .expect("empty");
         assert!(empty.is_empty());
+
+        // None should return actions from all accounts
+        let all_queued = repo
+            .list_by_status(ActionStatus::Queued, None)
+            .await
+            .expect("all queued");
+        assert_eq!(all_queued.len(), 2);
+        let all_ids: Vec<&str> = all_queued.iter().map(|a| a.id.as_str()).collect();
+        assert!(all_ids.contains(&action1.id.as_str()));
+        assert!(all_ids.contains(&action2.id.as_str()));
     }
 
     #[tokio::test]
