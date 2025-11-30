@@ -1,3 +1,4 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/dimfeld/llmutils/main/schema/rmplan-config-schema.json
 paths:
   tasks: tasks
 defaultExecutor: claude-code
@@ -12,6 +13,8 @@ postApplyCommands:
     workingDirectory: server
     allowFailure: true
     hideOutputOnSuccess: true
+updateDocs:
+  mode: after-iteration
 executors:
   claude-code:
     permissionsMcp:
