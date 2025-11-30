@@ -1,12 +1,16 @@
 use std::sync::Arc;
 
 use chrono::Utc;
+use reqwest::StatusCode;
 use serde::Deserialize;
 use tracing::{debug, info};
 
-use crate::accounts::AccountRepository;
-use crate::gmail::{GmailClient, NoopTokenStore};
-use crate::jobs::{JOB_TYPE_INGEST_GMAIL, JobDispatcher, map_account_error, map_gmail_error};
+use crate::accounts::{Account, AccountRepository, SyncStatus};
+use crate::gmail::{GmailClient, GmailClientError, NoopTokenStore};
+use crate::jobs::{
+    JOB_TYPE_BACKFILL_GMAIL, JOB_TYPE_INGEST_GMAIL, JobDispatcher, map_account_error,
+    map_gmail_error,
+};
 use crate::queue::{JobQueue, QueueError};
 use crate::{Job, JobError};
 
@@ -50,24 +54,50 @@ pub async fn handle_history_sync_gmail(
         .as_deref()
         .unwrap_or(&payload.history_id);
 
-    let response = client
-        .list_history(start_history_id, None, None)
-        .await
-        .map_err(|err| map_gmail_error("list_history", err))?;
-
     let queue = JobQueue::new(dispatcher.db.clone());
-    for record in response.history.iter() {
-        if let Some(messages_added) = &record.messages_added {
-            for change in messages_added {
-                enqueue_ingest_job(&queue, &payload.account_id, &change.message.id).await?;
+    let mut page_token: Option<String> = None;
+    let mut latest_history_id: Option<String> = None;
+
+    // Pagination loop - process all pages of history
+    loop {
+        let response =
+            match client
+                .list_history(start_history_id, page_token.as_deref(), None)
+                .await
+            {
+                Ok(resp) => resp,
+                Err(err) if is_history_not_found(&err) => {
+                    info!(
+                        account_id = %payload.account_id,
+                        history_id = %start_history_id,
+                        "history_id too old, triggering backfill"
+                    );
+                    return trigger_backfill(&account_repo, &queue, &account).await;
+                }
+                Err(err) => return Err(map_gmail_error("list_history", err)),
+            };
+
+        // Track the latest historyId from responses
+        if response.history_id.is_some() {
+            latest_history_id = response.history_id.clone();
+        }
+
+        for record in response.history.iter() {
+            if let Some(messages_added) = &record.messages_added {
+                for change in messages_added {
+                    enqueue_ingest_job(&queue, &payload.account_id, &change.message.id).await?;
+                }
             }
+        }
+
+        match response.next_page_token {
+            Some(token) => page_token = Some(token),
+            None => break,
         }
     }
 
     let mut new_state = account.state.clone();
-    new_state.history_id = response
-        .history_id
-        .or_else(|| Some(payload.history_id.clone()));
+    new_state.history_id = latest_history_id.or_else(|| Some(payload.history_id.clone()));
     new_state.last_sync_at = Some(Utc::now());
 
     account_repo
@@ -109,6 +139,62 @@ async fn enqueue_ingest_job(
             "enqueue ingest job failed: {err}"
         ))),
     }
+}
+
+/// Check if the error indicates the history ID was not found (stale/expired)
+fn is_history_not_found(err: &GmailClientError) -> bool {
+    match err {
+        GmailClientError::Http(http_err) => http_err.status() == Some(StatusCode::NOT_FOUND),
+        _ => false,
+    }
+}
+
+/// Trigger a backfill job when history ID is stale
+async fn trigger_backfill(
+    account_repo: &AccountRepository,
+    queue: &JobQueue,
+    account: &Account,
+) -> Result<(), JobError> {
+    // Update account state to indicate backfill is needed
+    let mut new_state = account.state.clone();
+    new_state.sync_status = SyncStatus::NeedsBackfill;
+    new_state.history_id = None; // Clear stale historyId
+
+    account_repo
+        .update_state(&account.id, &new_state)
+        .await
+        .map_err(|err| map_account_error("update state for backfill", err))?;
+
+    // Determine backfill query based on last_sync_at
+    let query = match new_state.last_sync_at {
+        Some(dt) => {
+            let days = (Utc::now() - dt).num_days().max(1).min(30);
+            format!("newer_than:{}d", days)
+        }
+        None => "newer_than:7d".to_string(),
+    };
+
+    // Enqueue backfill job at lower priority
+    let payload = serde_json::json!({
+        "account_id": account.id,
+        "query": query,
+    });
+    let idempotency = format!("{JOB_TYPE_BACKFILL_GMAIL}:{}:fallback", account.id);
+
+    match queue
+        .enqueue(JOB_TYPE_BACKFILL_GMAIL, payload, Some(idempotency), -10)
+        .await
+    {
+        Ok(_) => info!(account_id = %account.id, "backfill job enqueued"),
+        Err(QueueError::DuplicateIdempotency { .. }) => {
+            debug!(account_id = %account.id, "backfill job already enqueued");
+        }
+        Err(err) => {
+            return Err(JobError::Retryable(format!("enqueue backfill: {err}")));
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -252,8 +338,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn history_sync_returns_fatal_on_not_found() {
-        let (_repo, dispatcher, _dir, account_id) = setup_account().await;
+    async fn history_sync_triggers_backfill_on_not_found() {
+        let (repo, dispatcher, _dir, account_id) = setup_account().await;
         let queue = JobQueue::new(dispatcher.db.clone());
 
         let server = MockServer::start().await;
@@ -269,7 +355,7 @@ mod tests {
         let job_id = queue
             .enqueue(
                 crate::jobs::JOB_TYPE_HISTORY_SYNC_GMAIL,
-                json!({"account_id": account_id, "history_id": "10"}),
+                json!({"account_id": account_id.clone(), "history_id": "10"}),
                 None,
                 1,
             )
@@ -277,14 +363,30 @@ mod tests {
             .expect("enqueue job");
         let job = queue.fetch_job(&job_id).await.expect("fetch job");
 
-        let err = handle_history_sync_gmail(&dispatcher, job)
+        // Should succeed (not error) because it triggers backfill
+        handle_history_sync_gmail(&dispatcher, job)
             .await
-            .expect_err("history sync should surface fatal 404");
+            .expect("history sync should succeed by triggering backfill");
 
-        match err {
-            JobError::Fatal(msg) => assert!(msg.contains("404")),
-            other => panic!("expected fatal, got {:?}", other),
-        }
+        // Verify backfill job was enqueued
+        let conn = dispatcher.db.connection().await.expect("conn");
+        let mut rows = conn
+            .query(
+                "SELECT type, payload_json FROM jobs WHERE type = ?1",
+                libsql::params![crate::jobs::JOB_TYPE_BACKFILL_GMAIL],
+            )
+            .await
+            .expect("query");
+        let row = rows.next().await.expect("row").expect("backfill job exists");
+        let job_type: String = row.get(0).expect("type");
+        assert_eq!(job_type, "backfill.gmail");
+        let payload: String = row.get(1).expect("payload");
+        assert!(payload.contains(&account_id));
+
+        // Verify account state was updated
+        let account = repo.get_by_id(&account_id).await.expect("account");
+        assert_eq!(account.state.sync_status, SyncStatus::NeedsBackfill);
+        assert!(account.state.history_id.is_none()); // Cleared stale historyId
     }
 
     #[tokio::test]
@@ -383,5 +485,134 @@ mod tests {
             .expect("query");
         let count: i64 = rows.next().await.unwrap().unwrap().get(0).unwrap();
         assert_eq!(count, 1, "duplicate ingest job should not be inserted");
+    }
+
+    #[tokio::test]
+    async fn history_sync_handles_pagination() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use wiremock::{Request, Respond, ResponseTemplate};
+
+        let (repo, dispatcher, _dir, account_id) = setup_account().await;
+        let queue = JobQueue::new(dispatcher.db.clone());
+
+        let server = MockServer::start().await;
+        let api_base = format!("{}/gmail/v1/users", &server.uri());
+        let dispatcher = dispatcher.with_gmail_api_base(api_base);
+
+        // Use a counter to track which response to return
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let call_count_clone = call_count.clone();
+
+        struct PaginatedResponder {
+            call_count: Arc<AtomicUsize>,
+        }
+
+        impl Respond for PaginatedResponder {
+            fn respond(&self, _request: &Request) -> ResponseTemplate {
+                let count = self.call_count.fetch_add(1, Ordering::SeqCst);
+                if count == 0 {
+                    // First call - return page with nextPageToken
+                    ResponseTemplate::new(200).set_body_json(json!({
+                        "history": [
+                            { "id": "11", "messagesAdded": [ { "message": { "id": "msg-page1", "threadId": "thr-1" } } ] }
+                        ],
+                        "historyId": "15",
+                        "nextPageToken": "page2token"
+                    }))
+                } else {
+                    // Second call - return final page
+                    ResponseTemplate::new(200).set_body_json(json!({
+                        "history": [
+                            { "id": "16", "messagesAdded": [ { "message": { "id": "msg-page2", "threadId": "thr-2" } } ] }
+                        ],
+                        "historyId": "20"
+                    }))
+                }
+            }
+        }
+
+        Mock::given(method("GET"))
+            .and(path("/gmail/v1/users/user@example.com/history"))
+            .respond_with(PaginatedResponder { call_count: call_count_clone })
+            .expect(2)
+            .mount(&server)
+            .await;
+
+        let job_id = queue
+            .enqueue(
+                crate::jobs::JOB_TYPE_HISTORY_SYNC_GMAIL,
+                json!({"account_id": account_id.clone(), "history_id": "10"}),
+                None,
+                1,
+            )
+            .await
+            .expect("enqueue job");
+        let job = queue.fetch_job(&job_id).await.expect("fetch job");
+
+        handle_history_sync_gmail(&dispatcher, job)
+            .await
+            .expect("history sync with pagination");
+
+        // Verify both calls were made
+        assert_eq!(call_count.load(Ordering::SeqCst), 2);
+
+        // Verify both messages from both pages were enqueued
+        let conn = dispatcher.db.connection().await.expect("conn");
+        let mut rows = conn
+            .query(
+                "SELECT payload_json FROM jobs WHERE type = ?1 ORDER BY payload_json",
+                libsql::params![JOB_TYPE_INGEST_GMAIL],
+            )
+            .await
+            .expect("query");
+
+        let first = rows.next().await.expect("row").expect("first job");
+        let first_payload: String = first.get(0).expect("payload");
+        assert!(first_payload.contains("msg-page1"));
+
+        let second = rows.next().await.expect("row").expect("second job");
+        let second_payload: String = second.get(0).expect("payload");
+        assert!(second_payload.contains("msg-page2"));
+
+        // Verify historyId was updated to the last page's value
+        let account = repo.get_by_id(&account_id).await.expect("account");
+        assert_eq!(account.state.history_id.as_deref(), Some("20"));
+    }
+
+    #[tokio::test]
+    async fn history_sync_retries_on_403_rate_limit() {
+        let (_repo, dispatcher, _dir, account_id) = setup_account().await;
+        let queue = JobQueue::new(dispatcher.db.clone());
+
+        let server = MockServer::start().await;
+        let api_base = format!("{}/gmail/v1/users", &server.uri());
+        let dispatcher = dispatcher.with_gmail_api_base(api_base);
+
+        Mock::given(method("GET"))
+            .and(path("/gmail/v1/users/user@example.com/history"))
+            .respond_with(ResponseTemplate::new(403))
+            .mount(&server)
+            .await;
+
+        let job_id = queue
+            .enqueue(
+                crate::jobs::JOB_TYPE_HISTORY_SYNC_GMAIL,
+                json!({"account_id": account_id, "history_id": "10"}),
+                None,
+                1,
+            )
+            .await
+            .expect("enqueue job");
+        let job = queue.fetch_job(&job_id).await.expect("fetch job");
+
+        let err = handle_history_sync_gmail(&dispatcher, job)
+            .await
+            .expect_err("history sync should retry on 403 rate limit");
+
+        match err {
+            JobError::Retryable(msg) => assert!(msg.contains("403") || msg.contains("rate")),
+            other => panic!("expected retryable, got {:?}", other),
+        }
     }
 }

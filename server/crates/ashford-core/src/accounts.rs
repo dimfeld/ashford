@@ -40,11 +40,25 @@ pub struct AccountConfig {
     pub pubsub: PubsubConfig,
 }
 
+/// Tracks the synchronization status for an account.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SyncStatus {
+    /// Normal operation - history sync is working
+    #[default]
+    Normal,
+    /// History ID became stale (404), needs backfill
+    NeedsBackfill,
+    /// Backfill job is in progress
+    Backfilling,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct AccountState {
     pub history_id: Option<String>,
     pub last_sync_at: Option<DateTime<Utc>>,
-    pub sync_status: Option<String>,
+    #[serde(default)]
+    pub sync_status: SyncStatus,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -451,7 +465,7 @@ mod tests {
         let new_state = AccountState {
             history_id: Some("123".into()),
             last_sync_at: Some(Utc::now()),
-            sync_status: Some("syncing".into()),
+            sync_status: SyncStatus::Normal,
         };
 
         let state_updated = repo
@@ -579,7 +593,7 @@ mod tests {
         let new_state = AccountState {
             history_id: Some("later".into()),
             last_sync_at: None,
-            sync_status: None,
+            sync_status: SyncStatus::Normal,
         };
         let updated = repo
             .update_state(&account.id, &new_state)
