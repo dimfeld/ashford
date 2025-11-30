@@ -12,5 +12,12 @@ postApplyCommands:
     workingDirectory: server
     allowFailure: true
     hideOutputOnSuccess: true
+executors:
+  claude-code:
+    permissionsMcp:
+      enabled: true
+      timeout: 60000
+      defaultResponse: no
+      autoApproveCreatedFileDeletion: true
 prCreation:
   draft: true

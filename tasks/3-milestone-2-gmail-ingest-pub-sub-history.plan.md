@@ -6,7 +6,7 @@ goal: Implement Gmail integration with Pub/Sub notifications, History API sync,
 id: 3
 uuid: b93a0b33-fccb-4f57-8c97-002039917c44
 generatedBy: agent
-status: in_progress
+status: done
 priority: high
 container: true
 temp: false
@@ -16,15 +16,47 @@ dependencies:
   - 11
   - 12
 parent: 1
+references: {}
 issue: []
+pullRequest: []
 docs:
   - docs/gmail_integration.md
   - docs/data_model.md
 planGeneratedAt: 2025-11-29T01:23:11.905Z
 promptsGeneratedAt: 2025-11-29T01:23:11.905Z
 createdAt: 2025-11-29T01:21:26.709Z
-updatedAt: 2025-11-29T07:56:18.923Z
+updatedAt: 2025-11-30T01:05:59.064Z
+progressNotes: []
 tasks: []
+changedFiles:
+  - server/Cargo.lock
+  - server/crates/ashford-core/Cargo.toml
+  - server/crates/ashford-core/src/accounts.rs
+  - server/crates/ashford-core/src/gmail/mod.rs
+  - server/crates/ashford-core/src/gmail/parser.rs
+  - server/crates/ashford-core/src/jobs/history_sync_gmail.rs
+  - server/crates/ashford-core/src/jobs/ingest_gmail.rs
+  - server/crates/ashford-core/src/jobs/mod.rs
+  - server/crates/ashford-core/src/lib.rs
+  - server/crates/ashford-core/src/messages.rs
+  - server/crates/ashford-core/src/migrations.rs
+  - server/crates/ashford-core/src/pubsub.rs
+  - server/crates/ashford-core/src/pubsub_listener.rs
+  - server/crates/ashford-core/src/threads.rs
+  - server/crates/ashford-core/tests/ingest_flow.rs
+  - server/crates/ashford-server/src/main.rs
+  - server/migrations/003_add_thread_message_unique_indices.sql
+  - server/Cargo.toml
+  - server/crates/ashford-core/src/bin/gmail-oauth.rs
+  - server/crates/ashford-core/src/gmail/client.rs
+  - server/crates/ashford-core/src/gmail/oauth.rs
+  - server/crates/ashford-core/src/gmail/types.rs
+  - server/crates/ashford-core/src/worker.rs
+  - web/CLAUDE.md
+  - .rmfilter/config/rmplan.yml
+  - server/crates/ashford-core/src/jobs/backfill_gmail.rs
+  - server/crates/ashford-core/src/queue.rs
+  - server/crates/ashford-server/Cargo.toml
 tags:
   - gmail
   - pubsub

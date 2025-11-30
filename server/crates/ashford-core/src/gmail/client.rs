@@ -12,7 +12,7 @@ use crate::gmail::{
         DEFAULT_REFRESH_BUFFER, OAuthError, OAuthTokens, TOKEN_ENDPOINT, TokenStore,
         refresh_access_token_with_endpoint,
     },
-    types::{ListHistoryResponse, ListMessagesResponse, Message, Thread},
+    types::{ListHistoryResponse, ListMessagesResponse, Message, Profile, Thread},
 };
 
 const DEFAULT_API_BASE: &str = "https://gmail.googleapis.com/gmail/v1/users";
@@ -135,6 +135,12 @@ impl<S: TokenStore> GmailClient<S> {
             builder
         })
         .await
+    }
+
+    /// Fetches the user's Gmail profile, including the current historyId.
+    pub async fn get_profile(&self) -> Result<Profile, GmailClientError> {
+        let url = format!("{}/{}/profile", self.api_base, self.user_id);
+        self.send_json(|| self.http.get(&url)).await
     }
 
     async fn send_json<T, B>(&self, build: B) -> Result<T, GmailClientError>
@@ -770,5 +776,37 @@ mod tests {
             GmailClientError::TokenStore(msg) => assert!(msg.contains("store failure")),
             other => panic!("unexpected error: {:?}", other),
         }
+    }
+
+    #[tokio::test]
+    async fn get_profile_returns_history_id() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/gmail/v1/users/me/profile"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "emailAddress": "test@example.com",
+                "messagesTotal": 1234,
+                "threadsTotal": 567,
+                "historyId": "98765"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let tokens = OAuthTokens {
+            access_token: "token".into(),
+            refresh_token: "refresh".into(),
+            expires_at: Utc::now() + Duration::hours(1),
+        };
+        let store = Arc::new(RecordingStore::default());
+        let client = make_client(&server, tokens, store);
+
+        let profile = client.get_profile().await.expect("get_profile succeeds");
+
+        assert_eq!(profile.email_address, "test@example.com");
+        assert_eq!(profile.history_id, "98765");
+        assert_eq!(profile.messages_total, Some(1234));
+        assert_eq!(profile.threads_total, Some(567));
     }
 }

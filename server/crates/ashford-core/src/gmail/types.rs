@@ -110,3 +110,16 @@ pub struct ListMessagesResponse {
     #[serde(rename = "resultSizeEstimate")]
     pub result_size_estimate: Option<u64>,
 }
+
+/// Response from the Gmail Users.profile endpoint.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Profile {
+    #[serde(rename = "emailAddress")]
+    pub email_address: String,
+    #[serde(rename = "messagesTotal")]
+    pub messages_total: Option<u64>,
+    #[serde(rename = "threadsTotal")]
+    pub threads_total: Option<u64>,
+    #[serde(rename = "historyId")]
+    pub history_id: String,
+}

@@ -60,22 +60,21 @@ pub async fn handle_history_sync_gmail(
 
     // Pagination loop - process all pages of history
     loop {
-        let response =
-            match client
-                .list_history(start_history_id, page_token.as_deref(), None)
-                .await
-            {
-                Ok(resp) => resp,
-                Err(err) if is_history_not_found(&err) => {
-                    info!(
-                        account_id = %payload.account_id,
-                        history_id = %start_history_id,
-                        "history_id too old, triggering backfill"
-                    );
-                    return trigger_backfill(&account_repo, &queue, &account).await;
-                }
-                Err(err) => return Err(map_gmail_error("list_history", err)),
-            };
+        let response = match client
+            .list_history(start_history_id, page_token.as_deref(), None)
+            .await
+        {
+            Ok(resp) => resp,
+            Err(err) if is_history_not_found(&err) => {
+                info!(
+                    account_id = %payload.account_id,
+                    history_id = %start_history_id,
+                    "history_id too old, triggering backfill"
+                );
+                return trigger_backfill(&account_repo, &queue, &account).await;
+            }
+            Err(err) => return Err(map_gmail_error("list_history", err)),
+        };
 
         // Track the latest historyId from responses
         if response.history_id.is_some() {
@@ -377,7 +376,11 @@ mod tests {
             )
             .await
             .expect("query");
-        let row = rows.next().await.expect("row").expect("backfill job exists");
+        let row = rows
+            .next()
+            .await
+            .expect("row")
+            .expect("backfill job exists");
         let job_type: String = row.get(0).expect("type");
         assert_eq!(job_type, "backfill.gmail");
         let payload: String = row.get(1).expect("payload");
@@ -489,8 +492,8 @@ mod tests {
 
     #[tokio::test]
     async fn history_sync_handles_pagination() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
         use wiremock::{Request, Respond, ResponseTemplate};
 
         let (repo, dispatcher, _dir, account_id) = setup_account().await;
@@ -534,7 +537,9 @@ mod tests {
 
         Mock::given(method("GET"))
             .and(path("/gmail/v1/users/user@example.com/history"))
-            .respond_with(PaginatedResponder { call_count: call_count_clone })
+            .respond_with(PaginatedResponder {
+                call_count: call_count_clone,
+            })
             .expect(2)
             .mount(&server)
             .await;
