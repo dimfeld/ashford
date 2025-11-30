@@ -6,6 +6,7 @@ use tracing::{debug, info};
 
 use crate::Job;
 use crate::accounts::{AccountRepository, SyncStatus};
+use crate::constants::{DEFAULT_ORG_ID, DEFAULT_USER_ID};
 use crate::gmail::{GmailClient, NoopTokenStore};
 use crate::jobs::{JOB_TYPE_INGEST_GMAIL, JobDispatcher, map_account_error, map_gmail_error};
 use crate::queue::{JobQueue, QueueError};
@@ -36,7 +37,12 @@ pub async fn handle_backfill_gmail(dispatcher: &JobDispatcher, job: Job) -> Resu
 
     // 1. Refresh account tokens
     let account = account_repo
-        .refresh_tokens_if_needed(&payload.account_id, &dispatcher.http)
+        .refresh_tokens_if_needed(
+            DEFAULT_ORG_ID,
+            DEFAULT_USER_ID,
+            &payload.account_id,
+            &dispatcher.http,
+        )
         .await
         .map_err(|err| map_account_error("refresh account tokens", err))?;
 
@@ -86,7 +92,14 @@ pub async fn handle_backfill_gmail(dispatcher: &JobDispatcher, job: Job) -> Resu
         enqueue_next_page(&queue, &payload.account_id, &payload.query, &next_token).await?;
     } else {
         // Final page - get fresh historyId and update account state
-        finalize_backfill(&client, &account_repo, &payload.account_id).await?;
+        finalize_backfill(
+            &client,
+            &account_repo,
+            account.org_id,
+            account.user_id,
+            &payload.account_id,
+        )
+        .await?;
     }
 
     Ok(())
@@ -158,6 +171,8 @@ async fn enqueue_next_page(
 async fn finalize_backfill(
     client: &GmailClient<NoopTokenStore>,
     account_repo: &AccountRepository,
+    org_id: i64,
+    user_id: i64,
     account_id: &str,
 ) -> Result<(), JobError> {
     // Fetch fresh historyId from profile
@@ -168,7 +183,7 @@ async fn finalize_backfill(
 
     // Update account state to Normal with new historyId
     let account = account_repo
-        .get_by_id(account_id)
+        .get_by_id(org_id, user_id, account_id)
         .await
         .map_err(|err| map_account_error("get account", err))?;
 
@@ -178,7 +193,7 @@ async fn finalize_backfill(
     new_state.sync_status = SyncStatus::Normal;
 
     account_repo
-        .update_state(account_id, &new_state)
+        .update_state(org_id, user_id, account_id, &new_state)
         .await
         .map_err(|err| map_account_error("update account state", err))?;
 
@@ -223,7 +238,13 @@ mod tests {
             pubsub: PubsubConfig::default(),
         };
         let account = repo
-            .create("user@example.com", Some("User".into()), config)
+            .create(
+                DEFAULT_ORG_ID,
+                DEFAULT_USER_ID,
+                "user@example.com",
+                Some("User".into()),
+                config,
+            )
             .await
             .expect("create account");
 
@@ -303,7 +324,10 @@ mod tests {
         assert!(second_payload.contains("msg-2"));
 
         // Verify account state was updated
-        let account = repo.get_by_id(&account_id).await.expect("account");
+        let account = repo
+            .get_by_id(DEFAULT_ORG_ID, DEFAULT_USER_ID, &account_id)
+            .await
+            .expect("account");
         assert_eq!(account.state.history_id.as_deref(), Some("12345"));
         assert_eq!(account.state.sync_status, SyncStatus::Normal);
         assert!(account.state.last_sync_at.is_some());
@@ -421,7 +445,10 @@ mod tests {
             .expect("backfill succeeds");
 
         // Verify account state was updated on final page
-        let account = repo.get_by_id(&account_id).await.expect("account");
+        let account = repo
+            .get_by_id(DEFAULT_ORG_ID, DEFAULT_USER_ID, &account_id)
+            .await
+            .expect("account");
         assert_eq!(account.state.history_id.as_deref(), Some("99999"));
         assert_eq!(account.state.sync_status, SyncStatus::Normal);
     }
@@ -487,7 +514,10 @@ mod tests {
         assert_eq!(count, 0);
 
         // Verify account state was still updated
-        let account = repo.get_by_id(&account_id).await.expect("account");
+        let account = repo
+            .get_by_id(DEFAULT_ORG_ID, DEFAULT_USER_ID, &account_id)
+            .await
+            .expect("account");
         assert_eq!(account.state.history_id.as_deref(), Some("55555"));
         assert_eq!(account.state.sync_status, SyncStatus::Normal);
     }
@@ -693,11 +723,14 @@ mod tests {
         let (repo, dispatcher, queue, _dir, account_id) = setup_account().await;
 
         // Set account to NeedsBackfill state
-        let account = repo.get_by_id(&account_id).await.expect("account");
+        let account = repo
+            .get_by_id(DEFAULT_ORG_ID, DEFAULT_USER_ID, &account_id)
+            .await
+            .expect("account");
         let mut state = account.state.clone();
         state.sync_status = SyncStatus::NeedsBackfill;
         state.history_id = None;
-        repo.update_state(&account_id, &state)
+        repo.update_state(DEFAULT_ORG_ID, DEFAULT_USER_ID, &account_id, &state)
             .await
             .expect("update state");
 
@@ -742,7 +775,10 @@ mod tests {
             .expect("backfill succeeds");
 
         // Verify state transition
-        let account = repo.get_by_id(&account_id).await.expect("account");
+        let account = repo
+            .get_by_id(DEFAULT_ORG_ID, DEFAULT_USER_ID, &account_id)
+            .await
+            .expect("account");
         assert_eq!(account.state.sync_status, SyncStatus::Normal);
         assert_eq!(account.state.history_id.as_deref(), Some("77777"));
     }

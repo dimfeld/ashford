@@ -10,8 +10,8 @@ use super::types::{
     NewActionLink, NewDecision,
 };
 
-const DECISION_COLUMNS: &str = "id, account_id, message_id, source, decision_json, action_type, confidence, needs_approval, rationale, telemetry_json, created_at, updated_at";
-const ACTION_COLUMNS: &str = "id, account_id, message_id, decision_id, action_type, parameters_json, status, error_message, executed_at, undo_hint_json, trace_id, created_at, updated_at";
+const DECISION_COLUMNS: &str = "id, account_id, message_id, source, decision_json, action_type, confidence, needs_approval, rationale, telemetry_json, created_at, updated_at, org_id, user_id";
+const ACTION_COLUMNS: &str = "id, account_id, message_id, decision_id, action_type, parameters_json, status, error_message, executed_at, undo_hint_json, trace_id, created_at, updated_at, org_id, user_id";
 const ACTION_LINK_COLUMNS: &str = "id, cause_action_id, effect_action_id, relation_type";
 const RECENT_DECISION_LIMIT: i64 = 50;
 
@@ -88,8 +88,8 @@ impl DecisionRepository {
             .query(
                 &format!(
                     "INSERT INTO decisions (
-                        id, account_id, message_id, source, decision_json, action_type, confidence, needs_approval, rationale, telemetry_json, created_at, updated_at
-                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?11)
+                        id, account_id, message_id, source, decision_json, action_type, confidence, needs_approval, rationale, telemetry_json, created_at, updated_at, org_id, user_id
+                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?11, ?12, ?13)
                     RETURNING {DECISION_COLUMNS}"
                 ),
                 params![
@@ -103,7 +103,9 @@ impl DecisionRepository {
                     needs_approval,
                     new_decision.rationale,
                     telemetry_json,
-                    now
+                    now,
+                    new_decision.org_id,
+                    new_decision.user_id
                 ],
             )
             .await?;
@@ -114,12 +116,19 @@ impl DecisionRepository {
         }
     }
 
-    pub async fn get_by_id(&self, id: &str) -> Result<Decision, DecisionError> {
+    pub async fn get_by_id(
+        &self,
+        org_id: i64,
+        user_id: i64,
+        id: &str,
+    ) -> Result<Decision, DecisionError> {
         let conn = self.db.connection().await?;
         let mut rows = conn
             .query(
-                &format!("SELECT {DECISION_COLUMNS} FROM decisions WHERE id = ?1"),
-                params![id],
+                &format!(
+                    "SELECT {DECISION_COLUMNS} FROM decisions WHERE id = ?1 AND org_id = ?2 AND user_id = ?3"
+                ),
+                params![id, org_id, user_id],
             )
             .await?;
 
@@ -129,18 +138,23 @@ impl DecisionRepository {
         }
     }
 
-    pub async fn get_by_message_id(&self, message_id: &str) -> Result<Decision, DecisionError> {
+    pub async fn get_by_message_id(
+        &self,
+        org_id: i64,
+        user_id: i64,
+        message_id: &str,
+    ) -> Result<Decision, DecisionError> {
         let conn = self.db.connection().await?;
         let mut rows = conn
             .query(
                 &format!(
                     "SELECT {DECISION_COLUMNS}
                      FROM decisions
-                     WHERE message_id = ?1
+                     WHERE org_id = ?1 AND user_id = ?2 AND message_id = ?3
                      ORDER BY created_at DESC
                      LIMIT 1"
                 ),
-                params![message_id],
+                params![org_id, user_id, message_id],
             )
             .await?;
 
@@ -150,17 +164,22 @@ impl DecisionRepository {
         }
     }
 
-    pub async fn list(&self, account_id: Option<&str>) -> Result<Vec<Decision>, DecisionError> {
+    pub async fn list(
+        &self,
+        org_id: i64,
+        user_id: i64,
+        account_id: Option<&str>,
+    ) -> Result<Vec<Decision>, DecisionError> {
         let conn = self.db.connection().await?;
         let mut rows = conn
             .query(
                 &format!(
                     "SELECT {DECISION_COLUMNS}
                      FROM decisions
-                     WHERE (?1 IS NULL OR account_id = ?1)
+                     WHERE org_id = ?1 AND user_id = ?2 AND (?3 IS NULL OR account_id = ?3)
                      ORDER BY created_at DESC"
                 ),
-                params![account_id],
+                params![org_id, user_id, account_id],
             )
             .await?;
 
@@ -173,6 +192,8 @@ impl DecisionRepository {
 
     pub async fn list_recent(
         &self,
+        org_id: i64,
+        user_id: i64,
         account_id: Option<&str>,
     ) -> Result<Vec<Decision>, DecisionError> {
         let conn = self.db.connection().await?;
@@ -181,11 +202,11 @@ impl DecisionRepository {
                 &format!(
                     "SELECT {DECISION_COLUMNS}
                      FROM decisions
-                     WHERE (?1 IS NULL OR account_id = ?1)
+                     WHERE org_id = ?1 AND user_id = ?2 AND (?3 IS NULL OR account_id = ?3)
                      ORDER BY created_at DESC
-                     LIMIT ?2"
+                     LIMIT ?4"
                 ),
-                params![account_id, RECENT_DECISION_LIMIT],
+                params![org_id, user_id, account_id, RECENT_DECISION_LIMIT],
             )
             .await?;
 
@@ -225,8 +246,8 @@ impl ActionRepository {
             .query(
                 &format!(
                     "INSERT INTO actions (
-                        id, account_id, message_id, decision_id, action_type, parameters_json, status, error_message, executed_at, undo_hint_json, trace_id, created_at, updated_at
-                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12)
+                        id, account_id, message_id, decision_id, action_type, parameters_json, status, error_message, executed_at, undo_hint_json, trace_id, created_at, updated_at, org_id, user_id
+                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12, ?13, ?14)
                     RETURNING {ACTION_COLUMNS}"
                 ),
                 params![
@@ -241,7 +262,9 @@ impl ActionRepository {
                     executed_at,
                     undo_hint_json,
                     new_action.trace_id,
-                    now
+                    now,
+                    new_action.org_id,
+                    new_action.user_id
                 ],
             )
             .await?;
@@ -252,12 +275,19 @@ impl ActionRepository {
         }
     }
 
-    pub async fn get_by_id(&self, id: &str) -> Result<Action, ActionError> {
+    pub async fn get_by_id(
+        &self,
+        org_id: i64,
+        user_id: i64,
+        id: &str,
+    ) -> Result<Action, ActionError> {
         let conn = self.db.connection().await?;
         let mut rows = conn
             .query(
-                &format!("SELECT {ACTION_COLUMNS} FROM actions WHERE id = ?1"),
-                params![id],
+                &format!(
+                    "SELECT {ACTION_COLUMNS} FROM actions WHERE id = ?1 AND org_id = ?2 AND user_id = ?3"
+                ),
+                params![id, org_id, user_id],
             )
             .await?;
 
@@ -267,17 +297,22 @@ impl ActionRepository {
         }
     }
 
-    pub async fn get_by_decision_id(&self, decision_id: &str) -> Result<Vec<Action>, ActionError> {
+    pub async fn get_by_decision_id(
+        &self,
+        org_id: i64,
+        user_id: i64,
+        decision_id: &str,
+    ) -> Result<Vec<Action>, ActionError> {
         let conn = self.db.connection().await?;
         let mut rows = conn
             .query(
                 &format!(
                     "SELECT {ACTION_COLUMNS}
                      FROM actions
-                     WHERE decision_id = ?1
+                     WHERE org_id = ?1 AND user_id = ?2 AND decision_id = ?3
                      ORDER BY created_at"
                 ),
-                params![decision_id],
+                params![org_id, user_id, decision_id],
             )
             .await?;
 
@@ -288,17 +323,22 @@ impl ActionRepository {
         Ok(actions)
     }
 
-    pub async fn list_by_message_id(&self, message_id: &str) -> Result<Vec<Action>, ActionError> {
+    pub async fn list_by_message_id(
+        &self,
+        org_id: i64,
+        user_id: i64,
+        message_id: &str,
+    ) -> Result<Vec<Action>, ActionError> {
         let conn = self.db.connection().await?;
         let mut rows = conn
             .query(
                 &format!(
                     "SELECT {ACTION_COLUMNS}
                      FROM actions
-                     WHERE message_id = ?1
+                     WHERE org_id = ?1 AND user_id = ?2 AND message_id = ?3
                      ORDER BY created_at"
                 ),
-                params![message_id],
+                params![org_id, user_id, message_id],
             )
             .await?;
 
@@ -311,6 +351,8 @@ impl ActionRepository {
 
     pub async fn list_by_status(
         &self,
+        org_id: i64,
+        user_id: i64,
         status: ActionStatus,
         account_id: Option<&str>,
     ) -> Result<Vec<Action>, ActionError> {
@@ -320,10 +362,10 @@ impl ActionRepository {
                 &format!(
                     "SELECT {ACTION_COLUMNS}
                      FROM actions
-                     WHERE status = ?1 AND (?2 IS NULL OR account_id = ?2)
+                     WHERE org_id = ?1 AND user_id = ?2 AND status = ?3 AND (?4 IS NULL OR account_id = ?4)
                      ORDER BY created_at"
                 ),
-                params![status.as_str(), account_id],
+                params![org_id, user_id, status.as_str(), account_id],
             )
             .await?;
 
@@ -336,12 +378,14 @@ impl ActionRepository {
 
     pub async fn update_status(
         &self,
+        org_id: i64,
+        user_id: i64,
         id: &str,
         next_status: ActionStatus,
         error_message: Option<String>,
         executed_at: Option<DateTime<Utc>>,
     ) -> Result<Action, ActionError> {
-        let current = self.get_by_id(id).await?;
+        let current = self.get_by_id(org_id, user_id, id).await?;
         if !is_valid_transition(&current.status, &next_status) {
             return Err(ActionError::InvalidStatusTransition {
                 from: current.status,
@@ -366,7 +410,7 @@ impl ActionRepository {
                          error_message = ?2,
                          executed_at = COALESCE(?3, executed_at),
                          updated_at = ?4
-                     WHERE id = ?5 AND status = ?6
+                     WHERE id = ?5 AND status = ?6 AND org_id = ?7 AND user_id = ?8
                      RETURNING {ACTION_COLUMNS}"
                 ),
                 params![
@@ -376,13 +420,15 @@ impl ActionRepository {
                     now,
                     id,
                     current.status.as_str(),
+                    org_id,
+                    user_id,
                 ],
             )
             .await?;
 
         match rows.next().await? {
             Some(row) => row_to_action(row),
-            None => match self.get_by_id(id).await {
+            None => match self.get_by_id(org_id, user_id, id).await {
                 Ok(latest) => Err(ActionError::InvalidStatusTransition {
                     from: latest.status,
                     to: next_status,
@@ -393,22 +439,50 @@ impl ActionRepository {
         }
     }
 
-    pub async fn mark_executing(&self, id: &str) -> Result<Action, ActionError> {
-        self.update_status(id, ActionStatus::Executing, None, Some(Utc::now()))
-            .await
+    pub async fn mark_executing(
+        &self,
+        org_id: i64,
+        user_id: i64,
+        id: &str,
+    ) -> Result<Action, ActionError> {
+        self.update_status(
+            org_id,
+            user_id,
+            id,
+            ActionStatus::Executing,
+            None,
+            Some(Utc::now()),
+        )
+        .await
     }
 
-    pub async fn mark_completed(&self, id: &str) -> Result<Action, ActionError> {
-        self.update_status(id, ActionStatus::Completed, None, Some(Utc::now()))
-            .await
+    pub async fn mark_completed(
+        &self,
+        org_id: i64,
+        user_id: i64,
+        id: &str,
+    ) -> Result<Action, ActionError> {
+        self.update_status(
+            org_id,
+            user_id,
+            id,
+            ActionStatus::Completed,
+            None,
+            Some(Utc::now()),
+        )
+        .await
     }
 
     pub async fn mark_failed(
         &self,
+        org_id: i64,
+        user_id: i64,
         id: &str,
         error_message: String,
     ) -> Result<Action, ActionError> {
         self.update_status(
+            org_id,
+            user_id,
             id,
             ActionStatus::Failed,
             Some(error_message),
@@ -550,6 +624,8 @@ fn row_to_decision(row: Row) -> Result<Decision, DecisionError> {
     let telemetry_json: String = row.get(9)?;
     let created_at: String = row.get(10)?;
     let updated_at: String = row.get(11)?;
+    let org_id: i64 = row.get(12)?;
+    let user_id: i64 = row.get(13)?;
 
     let source = DecisionSource::from_str(&source)
         .ok_or_else(|| DecisionError::InvalidSource(source.clone()))?;
@@ -567,6 +643,8 @@ fn row_to_decision(row: Row) -> Result<Decision, DecisionError> {
         telemetry_json: serde_json::from_str(&telemetry_json)?,
         created_at: DateTime::parse_from_rfc3339(&created_at)?.with_timezone(&Utc),
         updated_at: DateTime::parse_from_rfc3339(&updated_at)?.with_timezone(&Utc),
+        org_id,
+        user_id,
     })
 }
 
@@ -577,6 +655,8 @@ fn row_to_action(row: Row) -> Result<Action, ActionError> {
     let undo_hint_json: String = row.get(9)?;
     let created_at: String = row.get(11)?;
     let updated_at: String = row.get(12)?;
+    let org_id: i64 = row.get(13)?;
+    let user_id: i64 = row.get(14)?;
 
     let status = ActionStatus::from_str(&status)
         .ok_or_else(|| ActionError::InvalidStatus(status.clone()))?;
@@ -598,6 +678,8 @@ fn row_to_action(row: Row) -> Result<Action, ActionError> {
         trace_id: row.get(10)?,
         created_at: DateTime::parse_from_rfc3339(&created_at)?.with_timezone(&Utc),
         updated_at: DateTime::parse_from_rfc3339(&updated_at)?.with_timezone(&Utc),
+        org_id,
+        user_id,
     })
 }
 
@@ -618,6 +700,7 @@ fn row_to_action_link(row: Row) -> Result<ActionLink, ActionLinkError> {
 mod tests {
     use super::*;
     use crate::accounts::{AccountConfig, AccountRepository, PubsubConfig};
+    use crate::constants::{DEFAULT_ORG_ID, DEFAULT_USER_ID};
     use crate::gmail::OAuthTokens;
     use crate::migrations::run_migrations;
     use crate::threads::ThreadRepository;
@@ -639,6 +722,10 @@ mod tests {
     }
 
     async fn seed_account_with_email(db: &Database, email: &str) -> String {
+        seed_account_for_org(db, DEFAULT_ORG_ID, DEFAULT_USER_ID, email).await
+    }
+
+    async fn seed_account_for_org(db: &Database, org_id: i64, user_id: i64, email: &str) -> String {
         let repo = AccountRepository::new(db.clone());
         let config = AccountConfig {
             client_id: "client".into(),
@@ -650,15 +737,34 @@ mod tests {
             },
             pubsub: PubsubConfig::default(),
         };
-        repo.create(email, Some("User".into()), config)
+        repo.create(org_id, user_id, email, Some("User".into()), config)
             .await
             .expect("create account")
             .id
     }
 
     async fn seed_thread(db: &Database, account_id: &str, provider_thread_id: &str) -> String {
+        seed_thread_for_org(
+            db,
+            DEFAULT_ORG_ID,
+            DEFAULT_USER_ID,
+            account_id,
+            provider_thread_id,
+        )
+        .await
+    }
+
+    async fn seed_thread_for_org(
+        db: &Database,
+        org_id: i64,
+        user_id: i64,
+        account_id: &str,
+        provider_thread_id: &str,
+    ) -> String {
         let repo = ThreadRepository::new(db.clone());
         repo.upsert(
+            org_id,
+            user_id,
             account_id,
             provider_thread_id,
             Some("Subject".into()),
@@ -677,8 +783,29 @@ mod tests {
         thread_id: &str,
         provider_message_id: &str,
     ) -> String {
+        seed_message_for_org(
+            db,
+            DEFAULT_ORG_ID,
+            DEFAULT_USER_ID,
+            account_id,
+            thread_id,
+            provider_message_id,
+        )
+        .await
+    }
+
+    async fn seed_message_for_org(
+        db: &Database,
+        org_id: i64,
+        user_id: i64,
+        account_id: &str,
+        thread_id: &str,
+        provider_message_id: &str,
+    ) -> String {
         let repo = MessageRepository::new(db.clone());
         let msg = NewMessage {
+            org_id,
+            user_id,
             account_id: account_id.to_string(),
             thread_id: thread_id.to_string(),
             provider_message_id: provider_message_id.to_string(),
@@ -706,6 +833,8 @@ mod tests {
 
     fn sample_new_decision(account_id: &str, message_id: &str) -> NewDecision {
         NewDecision {
+            org_id: DEFAULT_ORG_ID,
+            user_id: DEFAULT_USER_ID,
             account_id: account_id.to_string(),
             message_id: message_id.to_string(),
             source: DecisionSource::Llm,
@@ -723,6 +852,19 @@ mod tests {
         }
     }
 
+    fn sample_new_decision_for(
+        org_id: i64,
+        user_id: i64,
+        account_id: &str,
+        message_id: &str,
+    ) -> NewDecision {
+        NewDecision {
+            org_id,
+            user_id,
+            ..sample_new_decision(account_id, message_id)
+        }
+    }
+
     fn sample_new_action(
         account_id: &str,
         message_id: &str,
@@ -730,6 +872,8 @@ mod tests {
         status: ActionStatus,
     ) -> NewAction {
         NewAction {
+            org_id: DEFAULT_ORG_ID,
+            user_id: DEFAULT_USER_ID,
             account_id: account_id.to_string(),
             message_id: message_id.to_string(),
             decision_id: decision_id.map(|s| s.to_string()),
@@ -740,6 +884,21 @@ mod tests {
             executed_at: None,
             undo_hint_json: serde_json::json!({"inverse_action": "unarchive"}),
             trace_id: Some("trace-1".into()),
+        }
+    }
+
+    fn sample_new_action_for(
+        org_id: i64,
+        user_id: i64,
+        account_id: &str,
+        message_id: &str,
+        decision_id: Option<&str>,
+        status: ActionStatus,
+    ) -> NewAction {
+        NewAction {
+            org_id,
+            user_id,
+            ..sample_new_action(account_id, message_id, decision_id, status)
         }
     }
 
@@ -756,11 +915,14 @@ mod tests {
             .await
             .expect("create decision");
 
-        let by_id = repo.get_by_id(&created.id).await.expect("get by id");
+        let by_id = repo
+            .get_by_id(DEFAULT_ORG_ID, DEFAULT_USER_ID, &created.id)
+            .await
+            .expect("get by id");
         assert_eq!(created, by_id);
 
         let by_message = repo
-            .get_by_message_id(&message_id)
+            .get_by_message_id(DEFAULT_ORG_ID, DEFAULT_USER_ID, &message_id)
             .await
             .expect("get by message");
         assert_eq!(by_message.id, created.id);
@@ -789,12 +951,15 @@ mod tests {
             .expect("create other");
 
         let by_account = repo
-            .list(Some(&account_id))
+            .list(DEFAULT_ORG_ID, DEFAULT_USER_ID, Some(&account_id))
             .await
             .expect("list by account");
         assert_eq!(by_account.len(), 2);
 
-        let recent = repo.list_recent(Some(&account_id)).await.expect("recent");
+        let recent = repo
+            .list_recent(DEFAULT_ORG_ID, DEFAULT_USER_ID, Some(&account_id))
+            .await
+            .expect("recent");
         assert_eq!(recent.len(), 2);
         assert!(
             recent
@@ -803,11 +968,92 @@ mod tests {
         );
 
         // None should return all decisions across all accounts
-        let all_decisions = repo.list(None).await.expect("list all");
+        let all_decisions = repo
+            .list(DEFAULT_ORG_ID, DEFAULT_USER_ID, None)
+            .await
+            .expect("list all");
         assert_eq!(all_decisions.len(), 3);
 
-        let all_recent = repo.list_recent(None).await.expect("recent all");
+        let all_recent = repo
+            .list_recent(DEFAULT_ORG_ID, DEFAULT_USER_ID, None)
+            .await
+            .expect("recent all");
         assert_eq!(all_recent.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn decision_queries_scope_to_org_and_user() {
+        let (db, _dir) = setup_db().await;
+        let account1 =
+            seed_account_for_org(&db, DEFAULT_ORG_ID, DEFAULT_USER_ID, "user1@example.com").await;
+        let thread1 =
+            seed_thread_for_org(&db, DEFAULT_ORG_ID, DEFAULT_USER_ID, &account1, "t1").await;
+        let message1 = seed_message_for_org(
+            &db,
+            DEFAULT_ORG_ID,
+            DEFAULT_USER_ID,
+            &account1,
+            &thread1,
+            "m1",
+        )
+        .await;
+
+        let other_org = DEFAULT_ORG_ID + 1;
+        let other_user = DEFAULT_USER_ID + 1;
+        let account2 = seed_account_for_org(&db, other_org, other_user, "user2@example.com").await;
+        let thread2 = seed_thread_for_org(&db, other_org, other_user, &account2, "t2").await;
+        let message2 =
+            seed_message_for_org(&db, other_org, other_user, &account2, &thread2, "m2").await;
+
+        let repo = DecisionRepository::new(db);
+
+        let decision1 = repo
+            .create(sample_new_decision(&account1, &message1))
+            .await
+            .expect("decision1");
+        let decision2 = repo
+            .create(sample_new_decision_for(
+                other_org, other_user, &account2, &message2,
+            ))
+            .await
+            .expect("decision2");
+
+        assert_eq!(decision1.org_id, DEFAULT_ORG_ID);
+        assert_eq!(decision1.user_id, DEFAULT_USER_ID);
+        assert_eq!(decision2.org_id, other_org);
+        assert_eq!(decision2.user_id, other_user);
+
+        let scoped = repo
+            .get_by_id(DEFAULT_ORG_ID, DEFAULT_USER_ID, &decision1.id)
+            .await
+            .expect("scoped fetch");
+        assert_eq!(scoped.id, decision1.id);
+
+        let wrong_org = repo
+            .get_by_id(other_org, other_user, &decision1.id)
+            .await
+            .expect_err("wrong tenant should not fetch");
+        assert!(matches!(wrong_org, DecisionError::NotFound(_)));
+
+        let list_org1 = repo
+            .list(DEFAULT_ORG_ID, DEFAULT_USER_ID, None)
+            .await
+            .expect("list org1");
+        assert_eq!(list_org1.len(), 1);
+        assert_eq!(list_org1[0].id, decision1.id);
+
+        let list_org2 = repo
+            .list(other_org, other_user, None)
+            .await
+            .expect("list org2");
+        assert_eq!(list_org2.len(), 1);
+        assert_eq!(list_org2[0].id, decision2.id);
+
+        let wrong_message = repo
+            .get_by_message_id(DEFAULT_ORG_ID, other_user, &message1)
+            .await
+            .expect_err("wrong user should not find decision");
+        assert!(matches!(wrong_message, DecisionError::NotFound(_)));
     }
 
     #[tokio::test]
@@ -842,18 +1088,26 @@ mod tests {
             .await
             .expect("create a2");
 
-        let fetched = repo.get_by_id(&a1.id).await.expect("get by id");
+        let fetched = repo
+            .get_by_id(DEFAULT_ORG_ID, DEFAULT_USER_ID, &a1.id)
+            .await
+            .expect("get by id");
         assert_eq!(a1.id, fetched.id);
         assert_eq!(fetched.status, ActionStatus::Queued);
 
         let by_decision = repo
-            .get_by_decision_id(&decision.id)
+            .get_by_decision_id(DEFAULT_ORG_ID, DEFAULT_USER_ID, &decision.id)
             .await
             .expect("by decision");
         assert_eq!(by_decision.len(), 2);
 
         let queued = repo
-            .list_by_status(ActionStatus::Queued, Some(&account_id))
+            .list_by_status(
+                DEFAULT_ORG_ID,
+                DEFAULT_USER_ID,
+                ActionStatus::Queued,
+                Some(&account_id),
+            )
             .await
             .expect("queued");
         assert_eq!(queued.len(), 1);
@@ -884,20 +1138,27 @@ mod tests {
             .expect("create");
 
         let executing = repo
-            .mark_executing(&created.id)
+            .mark_executing(DEFAULT_ORG_ID, DEFAULT_USER_ID, &created.id)
             .await
             .expect("mark executing");
         assert_eq!(executing.status, ActionStatus::Executing);
         assert!(executing.executed_at.is_some());
 
         let completed = repo
-            .mark_completed(&created.id)
+            .mark_completed(DEFAULT_ORG_ID, DEFAULT_USER_ID, &created.id)
             .await
             .expect("mark completed");
         assert_eq!(completed.status, ActionStatus::Completed);
 
         let err = repo
-            .update_status(&created.id, ActionStatus::Queued, None, None)
+            .update_status(
+                DEFAULT_ORG_ID,
+                DEFAULT_USER_ID,
+                &created.id,
+                ActionStatus::Queued,
+                None,
+                None,
+            )
             .await
             .expect_err("should reject transition");
         assert!(matches!(err, ActionError::InvalidStatusTransition { .. }));
@@ -927,7 +1188,7 @@ mod tests {
             .expect("create");
 
         let failed = repo
-            .mark_failed(&created.id, "boom".into())
+            .mark_failed(DEFAULT_ORG_ID, DEFAULT_USER_ID, &created.id, "boom".into())
             .await
             .expect("fail");
         assert_eq!(failed.status, ActionStatus::Failed);
@@ -1014,13 +1275,13 @@ mod tests {
         let repo = DecisionRepository::new(db);
 
         let err = repo
-            .get_by_id("missing")
+            .get_by_id(DEFAULT_ORG_ID, DEFAULT_USER_ID, "missing")
             .await
             .expect_err("missing id should error");
         assert!(matches!(err, DecisionError::NotFound(_)));
 
         let err = repo
-            .get_by_message_id(&message_id)
+            .get_by_message_id(DEFAULT_ORG_ID, DEFAULT_USER_ID, &message_id)
             .await
             .expect_err("missing message should error");
         assert!(matches!(err, DecisionError::NotFound(_)));
@@ -1058,13 +1319,20 @@ mod tests {
         let repo = ActionRepository::new(db.clone());
 
         let err = repo
-            .get_by_id("missing")
+            .get_by_id(DEFAULT_ORG_ID, DEFAULT_USER_ID, "missing")
             .await
             .expect_err("missing action should error");
         assert!(matches!(err, ActionError::NotFound(_)));
 
         let err = repo
-            .update_status("missing", ActionStatus::Queued, None, None)
+            .update_status(
+                DEFAULT_ORG_ID,
+                DEFAULT_USER_ID,
+                "missing",
+                ActionStatus::Queued,
+                None,
+                None,
+            )
             .await
             .expect_err("missing update should error");
         assert!(matches!(err, ActionError::NotFound(_)));
@@ -1159,7 +1427,12 @@ mod tests {
 
         // list_by_status for account1 should only return action1
         let account1_queued = repo
-            .list_by_status(ActionStatus::Queued, Some(&account1_id))
+            .list_by_status(
+                DEFAULT_ORG_ID,
+                DEFAULT_USER_ID,
+                ActionStatus::Queued,
+                Some(&account1_id),
+            )
             .await
             .expect("account1 queued");
         assert_eq!(account1_queued.len(), 1);
@@ -1168,7 +1441,12 @@ mod tests {
 
         // list_by_status for account2 should only return action2
         let account2_queued = repo
-            .list_by_status(ActionStatus::Queued, Some(&account2_id))
+            .list_by_status(
+                DEFAULT_ORG_ID,
+                DEFAULT_USER_ID,
+                ActionStatus::Queued,
+                Some(&account2_id),
+            )
             .await
             .expect("account2 queued");
         assert_eq!(account2_queued.len(), 1);
@@ -1177,20 +1455,147 @@ mod tests {
 
         // Querying for a non-existent account should return empty
         let empty = repo
-            .list_by_status(ActionStatus::Queued, Some("nonexistent-account"))
+            .list_by_status(
+                DEFAULT_ORG_ID,
+                DEFAULT_USER_ID,
+                ActionStatus::Queued,
+                Some("nonexistent-account"),
+            )
             .await
             .expect("empty");
         assert!(empty.is_empty());
 
         // None should return actions from all accounts
         let all_queued = repo
-            .list_by_status(ActionStatus::Queued, None)
+            .list_by_status(DEFAULT_ORG_ID, DEFAULT_USER_ID, ActionStatus::Queued, None)
             .await
             .expect("all queued");
         assert_eq!(all_queued.len(), 2);
         let all_ids: Vec<&str> = all_queued.iter().map(|a| a.id.as_str()).collect();
         assert!(all_ids.contains(&action1.id.as_str()));
         assert!(all_ids.contains(&action2.id.as_str()));
+    }
+
+    #[tokio::test]
+    async fn action_queries_scope_to_org_and_user() {
+        let (db, _dir) = setup_db().await;
+        let account1 =
+            seed_account_for_org(&db, DEFAULT_ORG_ID, DEFAULT_USER_ID, "user1@example.com").await;
+        let thread1 =
+            seed_thread_for_org(&db, DEFAULT_ORG_ID, DEFAULT_USER_ID, &account1, "t1").await;
+        let message1 = seed_message_for_org(
+            &db,
+            DEFAULT_ORG_ID,
+            DEFAULT_USER_ID,
+            &account1,
+            &thread1,
+            "m1",
+        )
+        .await;
+
+        let other_org = DEFAULT_ORG_ID + 1;
+        let other_user = DEFAULT_USER_ID + 1;
+        let account2 = seed_account_for_org(&db, other_org, other_user, "user2@example.com").await;
+        let thread2 = seed_thread_for_org(&db, other_org, other_user, &account2, "t2").await;
+        let message2 =
+            seed_message_for_org(&db, other_org, other_user, &account2, &thread2, "m2").await;
+
+        let decisions = DecisionRepository::new(db.clone());
+        let decision1 = decisions
+            .create(sample_new_decision(&account1, &message1))
+            .await
+            .expect("decision1");
+        let decision2 = decisions
+            .create(sample_new_decision_for(
+                other_org, other_user, &account2, &message2,
+            ))
+            .await
+            .expect("decision2");
+
+        let repo = ActionRepository::new(db);
+        let action1 = repo
+            .create(sample_new_action(
+                &account1,
+                &message1,
+                Some(&decision1.id),
+                ActionStatus::Queued,
+            ))
+            .await
+            .expect("action1");
+        let action2 = repo
+            .create(sample_new_action_for(
+                other_org,
+                other_user,
+                &account2,
+                &message2,
+                Some(&decision2.id),
+                ActionStatus::Queued,
+            ))
+            .await
+            .expect("action2");
+
+        assert_eq!(action1.org_id, DEFAULT_ORG_ID);
+        assert_eq!(action1.user_id, DEFAULT_USER_ID);
+        assert_eq!(action2.org_id, other_org);
+        assert_eq!(action2.user_id, other_user);
+
+        let fetched = repo
+            .get_by_id(DEFAULT_ORG_ID, DEFAULT_USER_ID, &action1.id)
+            .await
+            .expect("fetch scoped");
+        assert_eq!(fetched.id, action1.id);
+
+        let wrong_tenant = repo
+            .get_by_id(other_org, other_user, &action1.id)
+            .await
+            .expect_err("wrong tenant should not fetch");
+        assert!(matches!(wrong_tenant, ActionError::NotFound(_)));
+
+        let org1_status = repo
+            .list_by_status(DEFAULT_ORG_ID, DEFAULT_USER_ID, ActionStatus::Queued, None)
+            .await
+            .expect("org1 status");
+        assert_eq!(org1_status.len(), 1);
+        assert_eq!(org1_status[0].id, action1.id);
+
+        let org2_status = repo
+            .list_by_status(other_org, other_user, ActionStatus::Queued, None)
+            .await
+            .expect("org2 status");
+        assert_eq!(org2_status.len(), 1);
+        assert_eq!(org2_status[0].id, action2.id);
+
+        let wrong_message = repo
+            .list_by_message_id(DEFAULT_ORG_ID, other_user, &message1)
+            .await
+            .expect("wrong message scope");
+        assert!(wrong_message.is_empty());
+
+        let update_wrong = repo
+            .update_status(
+                other_org,
+                other_user,
+                &action1.id,
+                ActionStatus::Executing,
+                None,
+                None,
+            )
+            .await
+            .expect_err("wrong tenant update");
+        assert!(matches!(update_wrong, ActionError::NotFound(_)));
+
+        let by_decision = repo
+            .get_by_decision_id(DEFAULT_ORG_ID, DEFAULT_USER_ID, &decision1.id)
+            .await
+            .expect("by decision");
+        assert_eq!(by_decision.len(), 1);
+        assert_eq!(by_decision[0].id, action1.id);
+
+        let cross_decision = repo
+            .get_by_decision_id(other_org, other_user, &decision1.id)
+            .await
+            .expect("cross decision");
+        assert!(cross_decision.is_empty());
     }
 
     #[tokio::test]
@@ -1226,7 +1631,7 @@ mod tests {
             .expect("queued");
 
         let by_message = repo
-            .list_by_message_id(&message_id)
+            .list_by_message_id(DEFAULT_ORG_ID, DEFAULT_USER_ID, &message_id)
             .await
             .expect("by message");
         let ids: Vec<String> = by_message.iter().map(|a| a.id.clone()).collect();
@@ -1234,14 +1639,28 @@ mod tests {
         assert!(ids.contains(&a2.id));
 
         let queued = repo
-            .update_status(&a1.id, ActionStatus::Queued, None, None)
+            .update_status(
+                DEFAULT_ORG_ID,
+                DEFAULT_USER_ID,
+                &a1.id,
+                ActionStatus::Queued,
+                None,
+                None,
+            )
             .await
             .expect("approved pending -> queued");
         assert_eq!(queued.status, ActionStatus::Queued);
         assert!(queued.executed_at.is_none());
 
         let err = repo
-            .update_status(&queued.id, ActionStatus::Completed, None, None)
+            .update_status(
+                DEFAULT_ORG_ID,
+                DEFAULT_USER_ID,
+                &queued.id,
+                ActionStatus::Completed,
+                None,
+                None,
+            )
             .await
             .expect_err("queued -> completed should be rejected");
         assert!(matches!(err, ActionError::InvalidStatusTransition { .. }));

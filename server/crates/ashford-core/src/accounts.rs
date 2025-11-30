@@ -10,8 +10,7 @@ use crate::gmail::oauth::{
     refresh_access_token_with_endpoint,
 };
 
-const ACCOUNT_COLUMNS: &str =
-    "id, provider, email, display_name, config_json, state_json, created_at, updated_at";
+const ACCOUNT_COLUMNS: &str = "id, provider, email, display_name, config_json, state_json, created_at, updated_at, org_id, user_id";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PubsubConfig {
@@ -71,6 +70,8 @@ pub struct Account {
     pub state: AccountState,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    pub org_id: i64,
+    pub user_id: i64,
 }
 
 #[derive(Debug, Error)]
@@ -103,6 +104,8 @@ impl AccountRepository {
 
     pub async fn create(
         &self,
+        org_id: i64,
+        user_id: i64,
         email: impl Into<String>,
         display_name: Option<String>,
         config: AccountConfig,
@@ -118,8 +121,8 @@ impl AccountRepository {
         let mut rows = conn
             .query(
                 &format!(
-                    "INSERT INTO accounts (id, provider, email, display_name, config_json, state_json, created_at, updated_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)
+                    "INSERT INTO accounts (id, provider, email, display_name, config_json, state_json, created_at, updated_at, org_id, user_id)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7, ?8, ?9)
                      RETURNING {ACCOUNT_COLUMNS}"
                 ),
                 params![
@@ -129,7 +132,9 @@ impl AccountRepository {
                     display_name,
                     config_json,
                     state_json,
-                    now
+                    now,
+                    org_id,
+                    user_id
                 ],
             )
             .await?;
@@ -141,12 +146,17 @@ impl AccountRepository {
         row_to_account(row)
     }
 
-    pub async fn get_by_id(&self, id: &str) -> Result<Account, AccountError> {
+    pub async fn get_by_id(
+        &self,
+        org_id: i64,
+        user_id: i64,
+        id: &str,
+    ) -> Result<Account, AccountError> {
         let conn = self.db.connection().await?;
         let mut rows = conn
             .query(
-                &format!("SELECT {ACCOUNT_COLUMNS} FROM accounts WHERE id = ?1"),
-                params![id],
+                &format!("SELECT {ACCOUNT_COLUMNS} FROM accounts WHERE id = ?1 AND org_id = ?2 AND user_id = ?3"),
+                params![id, org_id, user_id],
             )
             .await?;
 
@@ -156,12 +166,17 @@ impl AccountRepository {
         }
     }
 
-    pub async fn get_by_email(&self, email: &str) -> Result<Account, AccountError> {
+    pub async fn get_by_email(
+        &self,
+        org_id: i64,
+        user_id: i64,
+        email: &str,
+    ) -> Result<Account, AccountError> {
         let conn = self.db.connection().await?;
         let mut rows = conn
             .query(
-                &format!("SELECT {ACCOUNT_COLUMNS} FROM accounts WHERE email = ?1"),
-                params![email],
+                &format!("SELECT {ACCOUNT_COLUMNS} FROM accounts WHERE email = ?1 AND org_id = ?2 AND user_id = ?3"),
+                params![email, org_id, user_id],
             )
             .await?;
 
@@ -173,14 +188,19 @@ impl AccountRepository {
 
     pub async fn update_config(
         &self,
+        org_id: i64,
+        user_id: i64,
         id: &str,
         config: &AccountConfig,
     ) -> Result<Account, AccountError> {
-        self.update_config_with_expected(id, config, None).await
+        self.update_config_with_expected(org_id, user_id, id, config, None)
+            .await
     }
 
     pub async fn update_state(
         &self,
+        org_id: i64,
+        user_id: i64,
         id: &str,
         state: &AccountState,
     ) -> Result<Account, AccountError> {
@@ -192,10 +212,10 @@ impl AccountRepository {
                 &format!(
                     "UPDATE accounts
                      SET state_json = ?1, updated_at = ?2
-                     WHERE id = ?3
+                     WHERE id = ?3 AND org_id = ?4 AND user_id = ?5
                      RETURNING {ACCOUNT_COLUMNS}"
                 ),
-                params![state_json, now, id],
+                params![state_json, now, id, org_id, user_id],
             )
             .await?;
 
@@ -205,12 +225,12 @@ impl AccountRepository {
         }
     }
 
-    pub async fn list_all(&self) -> Result<Vec<Account>, AccountError> {
+    pub async fn list_all(&self, org_id: i64, user_id: i64) -> Result<Vec<Account>, AccountError> {
         let conn = self.db.connection().await?;
         let mut rows = conn
             .query(
-                &format!("SELECT {ACCOUNT_COLUMNS} FROM accounts ORDER BY created_at"),
-                (),
+                &format!("SELECT {ACCOUNT_COLUMNS} FROM accounts WHERE org_id = ?1 AND user_id = ?2 ORDER BY created_at"),
+                params![org_id, user_id],
             )
             .await?;
 
@@ -221,12 +241,12 @@ impl AccountRepository {
         Ok(accounts)
     }
 
-    pub async fn delete(&self, id: &str) -> Result<(), AccountError> {
+    pub async fn delete(&self, org_id: i64, user_id: i64, id: &str) -> Result<(), AccountError> {
         let conn = self.db.connection().await?;
         let mut rows = conn
             .query(
-                "DELETE FROM accounts WHERE id = ?1 RETURNING id",
-                params![id],
+                "DELETE FROM accounts WHERE id = ?1 AND org_id = ?2 AND user_id = ?3 RETURNING id",
+                params![id, org_id, user_id],
             )
             .await?;
 
@@ -238,10 +258,14 @@ impl AccountRepository {
 
     pub async fn refresh_tokens_if_needed(
         &self,
+        org_id: i64,
+        user_id: i64,
         account_id: &str,
         http: &reqwest::Client,
     ) -> Result<Account, AccountError> {
         self.refresh_tokens_if_needed_with_endpoint(
+            org_id,
+            user_id,
             account_id,
             http,
             DEFAULT_REFRESH_BUFFER,
@@ -252,28 +276,43 @@ impl AccountRepository {
 
     pub async fn refresh_tokens_if_needed_with_endpoint(
         &self,
+        org_id: i64,
+        user_id: i64,
         account_id: &str,
         http: &reqwest::Client,
         buffer: Duration,
         endpoint: &str,
     ) -> Result<Account, AccountError> {
-        let account = self.get_by_id(account_id).await?;
-        self.refresh_tokens_for_account_with_endpoint(account, http, buffer, endpoint)
-            .await
+        let account = self.get_by_id(org_id, user_id, account_id).await?;
+        self.refresh_tokens_for_account_with_endpoint(
+            org_id, user_id, account, http, buffer, endpoint,
+        )
+        .await
     }
 
     pub async fn refresh_tokens_for_account(
         &self,
+        org_id: i64,
+        user_id: i64,
         account: Account,
         http: &reqwest::Client,
         buffer: Duration,
     ) -> Result<Account, AccountError> {
-        self.refresh_tokens_for_account_with_endpoint(account, http, buffer, TOKEN_ENDPOINT)
-            .await
+        self.refresh_tokens_for_account_with_endpoint(
+            org_id,
+            user_id,
+            account,
+            http,
+            buffer,
+            TOKEN_ENDPOINT,
+        )
+        .await
     }
 
     pub async fn refresh_tokens_for_account_with_endpoint(
         &self,
+        org_id: i64,
+        user_id: i64,
         account: Account,
         http: &reqwest::Client,
         buffer: Duration,
@@ -295,12 +334,20 @@ impl AccountRepository {
         let mut new_config = account.config.clone();
         new_config.oauth = refreshed;
 
-        self.update_config_with_expected(&account.id, &new_config, Some(account.updated_at))
-            .await
+        self.update_config_with_expected(
+            org_id,
+            user_id,
+            &account.id,
+            &new_config,
+            Some(account.updated_at),
+        )
+        .await
     }
 
     async fn update_config_with_expected(
         &self,
+        org_id: i64,
+        user_id: i64,
         id: &str,
         config: &AccountConfig,
         expected_updated_at: Option<DateTime<Utc>>,
@@ -315,10 +362,10 @@ impl AccountRepository {
                 &format!(
                     "UPDATE accounts
                      SET config_json = ?1, updated_at = ?2
-                     WHERE id = ?3 AND updated_at = ?4
+                     WHERE id = ?3 AND updated_at = ?4 AND org_id = ?5 AND user_id = ?6
                      RETURNING {ACCOUNT_COLUMNS}"
                 ),
-                params![config_json, now, id, expected_str],
+                params![config_json, now, id, expected_str, org_id, user_id],
             )
             .await?
         } else {
@@ -326,10 +373,10 @@ impl AccountRepository {
                 &format!(
                     "UPDATE accounts
                      SET config_json = ?1, updated_at = ?2
-                     WHERE id = ?3
+                     WHERE id = ?3 AND org_id = ?4 AND user_id = ?5
                      RETURNING {ACCOUNT_COLUMNS}"
                 ),
-                params![config_json, now, id],
+                params![config_json, now, id, org_id, user_id],
             )
             .await?
         };
@@ -357,6 +404,8 @@ fn row_to_account(row: Row) -> Result<Account, AccountError> {
     let state_json: String = row.get(5)?;
     let created_at: String = row.get(6)?;
     let updated_at: String = row.get(7)?;
+    let org_id: i64 = row.get(8)?;
+    let user_id: i64 = row.get(9)?;
 
     Ok(Account {
         id: row.get(0)?,
@@ -367,12 +416,15 @@ fn row_to_account(row: Row) -> Result<Account, AccountError> {
         state: serde_json::from_str(&state_json)?,
         created_at: DateTime::parse_from_rfc3339(&created_at)?.with_timezone(&Utc),
         updated_at: DateTime::parse_from_rfc3339(&updated_at)?.with_timezone(&Utc),
+        org_id,
+        user_id,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::constants::{DEFAULT_ORG_ID, DEFAULT_USER_ID};
     use crate::db::Database;
     use crate::migrations::run_migrations;
     use tempfile::TempDir;
@@ -412,7 +464,13 @@ mod tests {
         let config = sample_config(Duration::hours(1));
 
         let account = repo
-            .create("user@example.com", Some("User".into()), config.clone())
+            .create(
+                DEFAULT_ORG_ID,
+                DEFAULT_USER_ID,
+                "user@example.com",
+                Some("User".into()),
+                config.clone(),
+            )
             .await
             .expect("create account");
 
@@ -421,16 +479,22 @@ mod tests {
         assert_eq!(account.config, config);
         assert!(account.state.history_id.is_none());
 
-        let by_id = repo.get_by_id(&account.id).await.expect("get by id");
+        let by_id = repo
+            .get_by_id(DEFAULT_ORG_ID, DEFAULT_USER_ID, &account.id)
+            .await
+            .expect("get by id");
         assert_eq!(by_id, account);
 
         let by_email = repo
-            .get_by_email("user@example.com")
+            .get_by_email(DEFAULT_ORG_ID, DEFAULT_USER_ID, "user@example.com")
             .await
             .expect("get by email");
         assert_eq!(by_email.id, account.id);
 
-        let listed = repo.list_all().await.expect("list accounts");
+        let listed = repo
+            .list_all(DEFAULT_ORG_ID, DEFAULT_USER_ID)
+            .await
+            .expect("list accounts");
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].id, account.id);
     }
@@ -440,7 +504,13 @@ mod tests {
         let (repo, _dir) = setup_repo().await;
         let config = sample_config(Duration::hours(1));
         let account = repo
-            .create("user@example.com", None, config)
+            .create(
+                DEFAULT_ORG_ID,
+                DEFAULT_USER_ID,
+                "user@example.com",
+                None,
+                config,
+            )
             .await
             .expect("create account");
 
@@ -456,7 +526,7 @@ mod tests {
         };
 
         let updated = repo
-            .update_config(&account.id, &new_config)
+            .update_config(DEFAULT_ORG_ID, DEFAULT_USER_ID, &account.id, &new_config)
             .await
             .expect("update config");
         assert_eq!(updated.config, new_config);
@@ -469,7 +539,7 @@ mod tests {
         };
 
         let state_updated = repo
-            .update_state(&account.id, &new_state)
+            .update_state(DEFAULT_ORG_ID, DEFAULT_USER_ID, &account.id, &new_state)
             .await
             .expect("update state");
         assert_eq!(state_updated.state.history_id.as_deref(), Some("123"));
@@ -481,13 +551,21 @@ mod tests {
         let (repo, _dir) = setup_repo().await;
         let config = sample_config(Duration::hours(1));
         let account = repo
-            .create("user@example.com", None, config)
+            .create(
+                DEFAULT_ORG_ID,
+                DEFAULT_USER_ID,
+                "user@example.com",
+                None,
+                config,
+            )
             .await
             .expect("create account");
 
-        repo.delete(&account.id).await.expect("delete succeeds");
+        repo.delete(DEFAULT_ORG_ID, DEFAULT_USER_ID, &account.id)
+            .await
+            .expect("delete succeeds");
         let err = repo
-            .get_by_id(&account.id)
+            .get_by_id(DEFAULT_ORG_ID, DEFAULT_USER_ID, &account.id)
             .await
             .expect_err("should be gone");
         assert!(matches!(err, AccountError::NotFound(_)));
@@ -527,13 +605,19 @@ mod tests {
         let (repo, _dir) = setup_repo().await;
         let config = sample_config(Duration::hours(2));
         let account = repo
-            .create("user@example.com", None, config)
+            .create(
+                DEFAULT_ORG_ID,
+                DEFAULT_USER_ID,
+                "user@example.com",
+                None,
+                config,
+            )
             .await
             .expect("create account");
 
         let client = reqwest::Client::new();
         let refreshed = repo
-            .refresh_tokens_if_needed(&account.id, &client)
+            .refresh_tokens_if_needed(DEFAULT_ORG_ID, DEFAULT_USER_ID, &account.id, &client)
             .await
             .expect("refresh check");
 
@@ -545,7 +629,13 @@ mod tests {
         let (repo, _dir) = setup_repo().await;
         let config = sample_config(Duration::minutes(1));
         let account = repo
-            .create("user@example.com", None, config)
+            .create(
+                DEFAULT_ORG_ID,
+                DEFAULT_USER_ID,
+                "user@example.com",
+                None,
+                config,
+            )
             .await
             .expect("create account");
 
@@ -564,6 +654,8 @@ mod tests {
         let client = reqwest::Client::new();
         let refreshed = repo
             .refresh_tokens_if_needed_with_endpoint(
+                DEFAULT_ORG_ID,
+                DEFAULT_USER_ID,
                 &account.id,
                 &client,
                 DEFAULT_REFRESH_BUFFER,
@@ -576,8 +668,80 @@ mod tests {
         assert_eq!(refreshed.config.oauth.refresh_token, "new_refresh");
         assert!(refreshed.updated_at > account.updated_at);
 
-        let stored = repo.get_by_id(&account.id).await.expect("reload account");
+        let stored = repo
+            .get_by_id(DEFAULT_ORG_ID, DEFAULT_USER_ID, &account.id)
+            .await
+            .expect("reload account");
         assert_eq!(stored.config.oauth.access_token, "new_access");
+    }
+
+    #[tokio::test]
+    async fn queries_are_scoped_by_org_and_user() {
+        let (repo, _dir) = setup_repo().await;
+        let config = sample_config(Duration::hours(1));
+
+        let primary = repo
+            .create(
+                DEFAULT_ORG_ID,
+                DEFAULT_USER_ID,
+                "primary@example.com",
+                None,
+                config.clone(),
+            )
+            .await
+            .expect("create primary");
+        let other_user = repo
+            .create(
+                DEFAULT_ORG_ID,
+                DEFAULT_USER_ID + 1,
+                "other@example.com",
+                None,
+                config.clone(),
+            )
+            .await
+            .expect("create other user");
+        let other_org = repo
+            .create(
+                DEFAULT_ORG_ID + 1,
+                DEFAULT_USER_ID,
+                "org@example.com",
+                None,
+                config,
+            )
+            .await
+            .expect("create other org");
+
+        // Lists return only rows for the requested org/user.
+        let user_accounts = repo
+            .list_all(DEFAULT_ORG_ID, DEFAULT_USER_ID)
+            .await
+            .expect("list for primary");
+        assert_eq!(user_accounts.len(), 1);
+        assert_eq!(user_accounts[0].id, primary.id);
+        let different_user = repo
+            .list_all(DEFAULT_ORG_ID, DEFAULT_USER_ID + 1)
+            .await
+            .expect("list for other user");
+        assert_eq!(different_user.len(), 1);
+        assert_eq!(different_user[0].id, other_user.id);
+        let different_org = repo
+            .list_all(DEFAULT_ORG_ID + 1, DEFAULT_USER_ID)
+            .await
+            .expect("list for other org");
+        assert_eq!(different_org.len(), 1);
+        assert_eq!(different_org[0].id, other_org.id);
+
+        // Fetching with the wrong org/user returns NotFound.
+        let wrong_user = repo
+            .get_by_id(DEFAULT_ORG_ID, DEFAULT_USER_ID + 1, &primary.id)
+            .await
+            .expect_err("wrong user should not see primary");
+        assert!(matches!(wrong_user, AccountError::NotFound(_)));
+        let wrong_org = repo
+            .get_by_email(DEFAULT_ORG_ID + 1, DEFAULT_USER_ID, &primary.email)
+            .await
+            .expect_err("wrong org should not see primary");
+        assert!(matches!(wrong_org, AccountError::NotFound(_)));
     }
 
     #[tokio::test]
@@ -585,7 +749,13 @@ mod tests {
         let (repo, _dir) = setup_repo().await;
         let config = sample_config(Duration::minutes(1));
         let account = repo
-            .create("user@example.com", None, config)
+            .create(
+                DEFAULT_ORG_ID,
+                DEFAULT_USER_ID,
+                "user@example.com",
+                None,
+                config,
+            )
             .await
             .expect("create account");
 
@@ -596,7 +766,7 @@ mod tests {
             sync_status: SyncStatus::Normal,
         };
         let updated = repo
-            .update_state(&account.id, &new_state)
+            .update_state(DEFAULT_ORG_ID, DEFAULT_USER_ID, &account.id, &new_state)
             .await
             .expect("update state");
 
@@ -615,6 +785,8 @@ mod tests {
         let client = reqwest::Client::new();
         let conflict = repo
             .refresh_tokens_for_account_with_endpoint(
+                DEFAULT_ORG_ID,
+                DEFAULT_USER_ID,
                 account,
                 &client,
                 DEFAULT_REFRESH_BUFFER,
@@ -624,7 +796,10 @@ mod tests {
             .expect_err("should conflict");
 
         assert!(matches!(conflict, AccountError::Conflict(_)));
-        let current = repo.get_by_id(&updated.id).await.expect("load latest");
+        let current = repo
+            .get_by_id(DEFAULT_ORG_ID, DEFAULT_USER_ID, &updated.id)
+            .await
+            .expect("load latest");
         assert_eq!(
             current.config.oauth.access_token,
             updated.config.oauth.access_token
@@ -636,20 +811,20 @@ mod tests {
         let (repo, _dir) = setup_repo().await;
 
         let missing_email = repo
-            .get_by_email("absent@example.com")
+            .get_by_email(DEFAULT_ORG_ID, DEFAULT_USER_ID, "absent@example.com")
             .await
             .expect_err("missing email should fail");
         assert!(matches!(missing_email, AccountError::NotFound(_)));
 
         let missing_delete = repo
-            .delete("nonexistent-id")
+            .delete(DEFAULT_ORG_ID, DEFAULT_USER_ID, "nonexistent-id")
             .await
             .expect_err("delete missing should fail");
         assert!(matches!(missing_delete, AccountError::NotFound(_)));
 
         let config = sample_config(Duration::hours(1));
         let missing_update = repo
-            .update_config("missing-id", &config)
+            .update_config(DEFAULT_ORG_ID, DEFAULT_USER_ID, "missing-id", &config)
             .await
             .expect_err("update missing should fail");
         assert!(matches!(missing_update, AccountError::NotFound(_)));
@@ -663,11 +838,20 @@ mod tests {
         config.pubsub.service_account_json = Some(credentials.into());
 
         let account = repo
-            .create("user@example.com", None, config.clone())
+            .create(
+                DEFAULT_ORG_ID,
+                DEFAULT_USER_ID,
+                "user@example.com",
+                None,
+                config.clone(),
+            )
             .await
             .expect("create account");
 
-        let stored = repo.get_by_id(&account.id).await.expect("load stored");
+        let stored = repo
+            .get_by_id(DEFAULT_ORG_ID, DEFAULT_USER_ID, &account.id)
+            .await
+            .expect("load stored");
         assert_eq!(
             stored.config.pubsub.service_account_json.as_deref(),
             Some(credentials)

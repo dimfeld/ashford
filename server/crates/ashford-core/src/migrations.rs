@@ -23,6 +23,10 @@ static MIGRATIONS: &[Migration] = &[
         version: "003_add_thread_message_unique_indices",
         sql: include_str!("../../../migrations/003_add_thread_message_unique_indices.sql"),
     },
+    Migration {
+        version: "004_add_org_user_columns",
+        sql: include_str!("../../../migrations/004_add_org_user_columns.sql"),
+    },
 ];
 
 #[derive(Error, Debug)]
@@ -79,6 +83,7 @@ pub async fn run_migrations(db: &Database) -> Result<(), MigrationError> {
 mod tests {
     use super::*;
     use libsql::{Connection, params};
+    use std::collections::HashMap;
     use tempfile::TempDir;
 
     async fn table_exists(conn: &Connection, name: &str) -> bool {
@@ -143,7 +148,7 @@ mod tests {
             .expect("row value")
             .get(0)
             .expect("count");
-        assert_eq!(count, 3, "migrations should only record once each");
+        assert_eq!(count, 4, "migrations should only record once each");
     }
 
     #[tokio::test]
@@ -217,6 +222,178 @@ mod tests {
         assert_eq!(
             count, 0,
             "failed migrations should not be recorded in schema_migrations"
+        );
+    }
+
+    fn column_map(
+        rows: Vec<(String, bool, Option<String>)>,
+    ) -> HashMap<String, (bool, Option<String>)> {
+        rows.into_iter()
+            .map(|(name, notnull, default)| (name, (notnull, default)))
+            .collect()
+    }
+
+    async fn load_columns(conn: &Connection, table: &str) -> Vec<(String, bool, Option<String>)> {
+        let mut rows = conn
+            .query(&format!("PRAGMA table_info({table})"), ())
+            .await
+            .expect("pragma table_info");
+        let mut cols = Vec::new();
+        while let Some(row) = rows.next().await.expect("row result") {
+            let name: String = row.get(1).expect("name");
+            let notnull: i64 = row.get(3).expect("notnull");
+            let default: Option<String> = row.get(4).ok();
+            cols.push((name, notnull == 1, default));
+        }
+        cols
+    }
+
+    async fn index_exists(conn: &Connection, table: &str, index_name: &str) -> bool {
+        let mut rows = conn
+            .query(&format!("PRAGMA index_list({table})"), ())
+            .await
+            .expect("pragma index_list");
+        while let Some(row) = rows.next().await.expect("row result") {
+            let name: String = row.get(1).expect("name");
+            if name == index_name {
+                return true;
+            }
+        }
+        false
+    }
+
+    #[tokio::test]
+    async fn org_user_columns_added_with_expected_constraints_and_indexes() {
+        let dir = TempDir::new().expect("temp dir");
+        let db_path = dir.path().join("db.sqlite");
+        let db = Database::new(&db_path).await.expect("create db");
+
+        run_migrations(&db).await.expect("migrations succeed");
+
+        let conn = db.connection().await.expect("open connection");
+
+        let required = [
+            "accounts",
+            "threads",
+            "messages",
+            "decisions",
+            "actions",
+            "rules_chat_sessions",
+            "rules_chat_messages",
+        ];
+
+        for table in required {
+            let cols = column_map(load_columns(&conn, table).await);
+            let (org_notnull, org_default) = cols
+                .get("org_id")
+                .expect("org_id present on required tables");
+            let (user_notnull, user_default) = cols
+                .get("user_id")
+                .expect("user_id present on required tables");
+            assert!(
+                *org_notnull && *user_notnull,
+                "{table} org_id and user_id should be NOT NULL"
+            );
+            assert_eq!(
+                org_default.as_deref(),
+                Some("1"),
+                "{table} org_id default 1"
+            );
+            assert_eq!(
+                user_default.as_deref(),
+                Some("1"),
+                "{table} user_id default 1"
+            );
+            assert!(
+                index_exists(&conn, table, &format!("{table}_org_user_idx")).await,
+                "{table} should have org/user composite index"
+            );
+        }
+
+        let nullable_user = ["deterministic_rules", "llm_rules", "directions"];
+        for table in nullable_user {
+            let cols = column_map(load_columns(&conn, table).await);
+            let (org_notnull, org_default) = cols
+                .get("org_id")
+                .expect("org_id present on nullable tables");
+            let (user_notnull, _user_default) = cols
+                .get("user_id")
+                .expect("user_id present on nullable tables");
+            assert!(*org_notnull, "{table} org_id should be NOT NULL");
+            assert_eq!(
+                org_default.as_deref(),
+                Some("1"),
+                "{table} org_id default 1"
+            );
+            assert!(!*user_notnull, "{table} user_id should be nullable");
+            assert!(
+                index_exists(&conn, table, &format!("{table}_org_user_idx")).await,
+                "{table} should have org/user composite index"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn org_user_migration_backfills_existing_rows() {
+        let dir = TempDir::new().expect("temp dir");
+        let db_path = dir.path().join("db.sqlite");
+        let db = Database::new(&db_path).await.expect("create db");
+        let conn = db.connection().await.expect("open connection");
+
+        apply_migrations(&conn, &MIGRATIONS[..3])
+            .await
+            .expect("initial migrations");
+
+        conn.execute(
+            "INSERT INTO accounts (id, provider, email, display_name, config_json, state_json, created_at, updated_at)
+             VALUES (?1, 'gmail', 'one@example.com', 'One', '{}', '{}', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z')",
+            params!["acc1"],
+        )
+        .await
+        .expect("insert account");
+
+        conn.execute(
+            "INSERT INTO deterministic_rules (id, name, description, scope, scope_ref, priority, enabled, conditions_json, action_type, action_parameters_json, safe_mode, created_at, updated_at)
+             VALUES (?1, 'Rule 1', 'desc', 'global', NULL, 100, 1, '{}', 'move', '{}', 'default', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z')",
+            params!["rule1"],
+        )
+        .await
+        .expect("insert deterministic rule");
+
+        apply_migrations(&conn, &MIGRATIONS[3..])
+            .await
+            .expect("apply org/user migration");
+
+        let mut rows = conn
+            .query(
+                "SELECT org_id, user_id FROM accounts WHERE id = ?1",
+                params!["acc1"],
+            )
+            .await
+            .expect("query accounts");
+        let account_row = rows.next().await.expect("row result").expect("account row");
+        let account_org: i64 = account_row.get(0).expect("org_id");
+        let account_user: i64 = account_row.get(1).expect("user_id");
+        assert_eq!(account_org, 1, "existing accounts should backfill org_id=1");
+        assert_eq!(
+            account_user, 1,
+            "existing accounts should backfill user_id=1"
+        );
+
+        let mut rows = conn
+            .query(
+                "SELECT org_id, user_id FROM deterministic_rules WHERE id = ?1",
+                params!["rule1"],
+            )
+            .await
+            .expect("query deterministic_rules");
+        let rule_row = rows.next().await.expect("row result").expect("rule row");
+        let rule_org: i64 = rule_row.get(0).expect("org_id");
+        let rule_user: Option<i64> = rule_row.get(1).expect("user_id");
+        assert_eq!(rule_org, 1, "org-wide tables should backfill org_id=1");
+        assert!(
+            rule_user.is_none(),
+            "nullable user_id tables should leave existing rows NULL"
         );
     }
 }

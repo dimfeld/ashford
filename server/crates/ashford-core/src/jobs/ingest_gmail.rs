@@ -5,6 +5,7 @@ use serde::Deserialize;
 use tracing::{info, warn};
 
 use crate::accounts::AccountRepository;
+use crate::constants::{DEFAULT_ORG_ID, DEFAULT_USER_ID};
 use crate::gmail::{GmailClient, NoopTokenStore, parse_message};
 use crate::jobs::{JobDispatcher, map_account_error, map_gmail_error};
 use crate::messages::{Mailbox, MessageRepository, NewMessage};
@@ -23,7 +24,12 @@ pub async fn handle_ingest_gmail(dispatcher: &JobDispatcher, job: Job) -> Result
 
     let account_repo = AccountRepository::new(dispatcher.db.clone());
     let account = account_repo
-        .refresh_tokens_if_needed(&payload.account_id, &dispatcher.http)
+        .refresh_tokens_if_needed(
+            DEFAULT_ORG_ID,
+            DEFAULT_USER_ID,
+            &payload.account_id,
+            &dispatcher.http,
+        )
         .await
         .map_err(|err| map_account_error("refresh account tokens", err))?;
 
@@ -66,6 +72,8 @@ pub async fn handle_ingest_gmail(dispatcher: &JobDispatcher, job: Job) -> Result
     let thread_repo = ThreadRepository::new(dispatcher.db.clone());
     let thread = thread_repo
         .upsert(
+            DEFAULT_ORG_ID,
+            DEFAULT_USER_ID,
             &payload.account_id,
             &thread_id,
             parsed.subject.clone(),
@@ -78,6 +86,8 @@ pub async fn handle_ingest_gmail(dispatcher: &JobDispatcher, job: Job) -> Result
 
     let msg_repo = MessageRepository::new(dispatcher.db.clone());
     let new_msg = NewMessage {
+        org_id: DEFAULT_ORG_ID,
+        user_id: DEFAULT_USER_ID,
         account_id: payload.account_id.clone(),
         thread_id: thread.id,
         provider_message_id: message.id.clone(),
@@ -185,7 +195,13 @@ mod tests {
             pubsub: PubsubConfig::default(),
         };
         let account = repo
-            .create("user@example.com", Some("User".into()), config)
+            .create(
+                DEFAULT_ORG_ID,
+                DEFAULT_USER_ID,
+                "user@example.com",
+                Some("User".into()),
+                config,
+            )
             .await
             .expect("create account");
 
@@ -256,7 +272,7 @@ mod tests {
 
         let thread_repo = ThreadRepository::new(dispatcher.db.clone());
         let thread = thread_repo
-            .get_by_provider_id(&account_id, "thr-1")
+            .get_by_provider_id(DEFAULT_ORG_ID, DEFAULT_USER_ID, &account_id, "thr-1")
             .await
             .expect("thread");
         assert_eq!(thread.provider_thread_id, "thr-1");
@@ -264,7 +280,7 @@ mod tests {
 
         let msg_repo = MessageRepository::new(dispatcher.db.clone());
         let stored = msg_repo
-            .get_by_provider_id(&account_id, "msg-1")
+            .get_by_provider_id(DEFAULT_ORG_ID, DEFAULT_USER_ID, &account_id, "msg-1")
             .await
             .expect("message");
         assert_eq!(stored.subject.as_deref(), Some("Greetings"));

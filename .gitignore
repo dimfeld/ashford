@@ -1,3 +1,4 @@
 .claude/settings.local.json
 *.plan-agent-output.md
 .rmfilter/reviews
+.env

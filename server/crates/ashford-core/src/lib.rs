@@ -1,5 +1,6 @@
 pub mod accounts;
 pub mod config;
+pub mod constants;
 pub mod db;
 pub mod decisions;
 pub mod gmail;
@@ -16,6 +17,7 @@ pub mod worker;
 
 pub use accounts::{Account, AccountConfig, AccountRepository, AccountState, PubsubConfig};
 pub use config::Config;
+pub use constants::{DEFAULT_ORG_ID, DEFAULT_USER_ID};
 pub use db::Database;
 pub use decisions::{
     Action, ActionError, ActionLink, ActionLinkError, ActionLinkRelationType, ActionRepository,
@@ -35,7 +37,9 @@ pub use queue::{Job, JobContext, JobQueue, JobState};
 pub use rules::{
     DeterministicRule, DeterministicRuleError, DeterministicRuleRepository, Direction,
     DirectionError, DirectionsRepository, LlmRule, LlmRuleError, LlmRuleRepository,
-    NewDeterministicRule, NewDirection, NewLlmRule, RuleScope, SafeMode,
+    NewDeterministicRule, NewDirection, NewLlmRule, NewRulesChatMessage, NewRulesChatSession,
+    RuleScope, RulesChatMessage, RulesChatMessageError, RulesChatMessageRepository, RulesChatRole,
+    RulesChatSession, RulesChatSessionError, RulesChatSessionRepository, SafeMode,
 };
 pub use telemetry::{TelemetryError, TelemetryGuard, init_logging, init_telemetry};
 pub use threads::{Thread, ThreadError, ThreadRepository};

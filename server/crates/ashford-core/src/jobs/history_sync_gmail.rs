@@ -6,6 +6,7 @@ use serde::Deserialize;
 use tracing::{debug, info};
 
 use crate::accounts::{Account, AccountRepository, SyncStatus};
+use crate::constants::{DEFAULT_ORG_ID, DEFAULT_USER_ID};
 use crate::gmail::{GmailClient, GmailClientError, NoopTokenStore};
 use crate::jobs::{
     JOB_TYPE_BACKFILL_GMAIL, JOB_TYPE_INGEST_GMAIL, JobDispatcher, map_account_error,
@@ -29,7 +30,12 @@ pub async fn handle_history_sync_gmail(
 
     let account_repo = AccountRepository::new(dispatcher.db.clone());
     let account = account_repo
-        .refresh_tokens_if_needed(&payload.account_id, &dispatcher.http)
+        .refresh_tokens_if_needed(
+            DEFAULT_ORG_ID,
+            DEFAULT_USER_ID,
+            &payload.account_id,
+            &dispatcher.http,
+        )
         .await
         .map_err(|err| map_account_error("refresh account tokens", err))?;
 
@@ -100,7 +106,7 @@ pub async fn handle_history_sync_gmail(
     new_state.last_sync_at = Some(Utc::now());
 
     account_repo
-        .update_state(&account.id, &new_state)
+        .update_state(account.org_id, account.user_id, &account.id, &new_state)
         .await
         .map_err(|err| map_account_error("update account state", err))?;
 
@@ -160,7 +166,7 @@ async fn trigger_backfill(
     new_state.history_id = None; // Clear stale historyId
 
     account_repo
-        .update_state(&account.id, &new_state)
+        .update_state(account.org_id, account.user_id, &account.id, &new_state)
         .await
         .map_err(|err| map_account_error("update state for backfill", err))?;
 
@@ -227,7 +233,13 @@ mod tests {
             pubsub: PubsubConfig::default(),
         };
         let account = repo
-            .create("user@example.com", Some("User".into()), config)
+            .create(
+                DEFAULT_ORG_ID,
+                DEFAULT_USER_ID,
+                "user@example.com",
+                Some("User".into()),
+                config,
+            )
             .await
             .expect("create account");
 
@@ -295,7 +307,10 @@ mod tests {
         let second_payload: String = second.get(1).expect("payload");
         assert!(second_payload.contains("msg-2"));
 
-        let account = repo.get_by_id(&account_id).await.expect("fetch account");
+        let account = repo
+            .get_by_id(DEFAULT_ORG_ID, DEFAULT_USER_ID, &account_id)
+            .await
+            .expect("fetch account");
         assert_eq!(account.state.history_id.as_deref(), Some("20"));
         assert!(account.state.last_sync_at.is_some());
     }
@@ -387,7 +402,10 @@ mod tests {
         assert!(payload.contains(&account_id));
 
         // Verify account state was updated
-        let account = repo.get_by_id(&account_id).await.expect("account");
+        let account = repo
+            .get_by_id(DEFAULT_ORG_ID, DEFAULT_USER_ID, &account_id)
+            .await
+            .expect("account");
         assert_eq!(account.state.sync_status, SyncStatus::NeedsBackfill);
         assert!(account.state.history_id.is_none()); // Cleared stale historyId
     }
@@ -398,9 +416,12 @@ mod tests {
         let queue = JobQueue::new(dispatcher.db.clone());
 
         // Persist a newer history id in account state to ensure it overrides payload.
-        let mut account = repo.get_by_id(&account_id).await.expect("account");
+        let mut account = repo
+            .get_by_id(DEFAULT_ORG_ID, DEFAULT_USER_ID, &account_id)
+            .await
+            .expect("account");
         account.state.history_id = Some("50".into());
-        repo.update_state(&account.id, &account.state)
+        repo.update_state(DEFAULT_ORG_ID, DEFAULT_USER_ID, &account.id, &account.state)
             .await
             .expect("update state");
 
@@ -433,7 +454,10 @@ mod tests {
             .await
             .expect("history sync");
 
-        let account = repo.get_by_id(&account_id).await.expect("account");
+        let account = repo
+            .get_by_id(DEFAULT_ORG_ID, DEFAULT_USER_ID, &account_id)
+            .await
+            .expect("account");
         assert_eq!(account.state.history_id.as_deref(), Some("60"));
     }
 
@@ -581,7 +605,10 @@ mod tests {
         assert!(second_payload.contains("msg-page2"));
 
         // Verify historyId was updated to the last page's value
-        let account = repo.get_by_id(&account_id).await.expect("account");
+        let account = repo
+            .get_by_id(DEFAULT_ORG_ID, DEFAULT_USER_ID, &account_id)
+            .await
+            .expect("account");
         assert_eq!(account.state.history_id.as_deref(), Some("20"));
     }
 

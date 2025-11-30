@@ -5,7 +5,9 @@ use ashford_core::migrations::run_migrations;
 use ashford_core::{
     AccountConfig, AccountRepository, Database, JOB_TYPE_HISTORY_SYNC_GMAIL, JOB_TYPE_INGEST_GMAIL,
     JobDispatcher, JobQueue, MessageError, MessageRepository, PubsubConfig, ThreadRepository,
-    WorkerConfig, run_worker,
+    WorkerConfig,
+    constants::{DEFAULT_ORG_ID, DEFAULT_USER_ID},
+    run_worker,
 };
 use base64::Engine;
 use serde_json::json;
@@ -76,7 +78,13 @@ async fn setup_account() -> (Database, AccountRepository, JobQueue, TempDir, Str
         pubsub: PubsubConfig::default(),
     };
     let account = repo
-        .create("user@example.com", Some("User".into()), config)
+        .create(
+            DEFAULT_ORG_ID,
+            DEFAULT_USER_ID,
+            "user@example.com",
+            Some("User".into()),
+            config,
+        )
         .await
         .expect("create account");
 
@@ -140,7 +148,10 @@ async fn worker_processes_history_and_ingests_message() {
     // Wait for ingest to create the message.
     let stored = timeout(Duration::from_secs(3), async {
         loop {
-            match msg_repo.get_by_provider_id(&account_id, "msg-1").await {
+            match msg_repo
+                .get_by_provider_id(DEFAULT_ORG_ID, DEFAULT_USER_ID, &account_id, "msg-1")
+                .await
+            {
                 Ok(msg) => break msg,
                 Err(MessageError::NotFound(_)) => sleep(Duration::from_millis(20)).await,
                 Err(err) => panic!("unexpected message error: {err}"),
@@ -155,12 +166,15 @@ async fn worker_processes_history_and_ingests_message() {
     assert_eq!(stored.body_html.as_deref(), Some("<p>Hello world</p>"));
 
     let thread = thread_repo
-        .get_by_provider_id(&account_id, "thr-1")
+        .get_by_provider_id(DEFAULT_ORG_ID, DEFAULT_USER_ID, &account_id, "thr-1")
         .await
         .expect("thread");
     assert_eq!(thread.provider_thread_id, "thr-1");
 
-    let account = account_repo.get_by_id(&account_id).await.expect("account");
+    let account = account_repo
+        .get_by_id(DEFAULT_ORG_ID, DEFAULT_USER_ID, &account_id)
+        .await
+        .expect("account");
     assert_eq!(account.state.history_id.as_deref(), Some("20"));
 
     shutdown.cancel();
@@ -222,7 +236,10 @@ async fn worker_deduplicates_ingest_for_same_message() {
     // still running.
     timeout(Duration::from_secs(3), async {
         loop {
-            match msg_repo.exists(&account_id, "msg-dup").await {
+            match msg_repo
+                .exists(DEFAULT_ORG_ID, DEFAULT_USER_ID, &account_id, "msg-dup")
+                .await
+            {
                 Ok(true) => {
                     let conn = db.connection().await.expect("conn");
                     let mut rows = conn

@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 use crate::db::{Database, DbError};
 
-const MESSAGE_COLUMNS: &str = "id, account_id, thread_id, provider_message_id, from_email, from_name, to_json, cc_json, bcc_json, subject, snippet, received_at, internal_date, labels_json, headers_json, body_plain, body_html, raw_json, created_at, updated_at";
+const MESSAGE_COLUMNS: &str = "id, account_id, thread_id, provider_message_id, from_email, from_name, to_json, cc_json, bcc_json, subject, snippet, received_at, internal_date, labels_json, headers_json, body_plain, body_html, raw_json, created_at, updated_at, org_id, user_id";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Mailbox {
@@ -37,10 +37,14 @@ pub struct Message {
     pub raw_json: Value,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    pub org_id: i64,
+    pub user_id: i64,
 }
 
 #[derive(Debug, Clone)]
 pub struct NewMessage {
+    pub org_id: i64,
+    pub user_id: i64,
     pub account_id: String,
     pub thread_id: String,
     pub provider_message_id: String,
@@ -86,6 +90,8 @@ impl MessageRepository {
 
     pub async fn upsert(&self, new_msg: NewMessage) -> Result<Message, MessageError> {
         let NewMessage {
+            org_id,
+            user_id,
             account_id,
             thread_id,
             provider_message_id,
@@ -123,8 +129,8 @@ impl MessageRepository {
             .query(
                 &format!(
                     "INSERT INTO messages (
-                        id, account_id, thread_id, provider_message_id, from_email, from_name, to_json, cc_json, bcc_json, subject, snippet, received_at, internal_date, labels_json, headers_json, body_plain, body_html, raw_json, created_at, updated_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?19)
+                        id, account_id, thread_id, provider_message_id, from_email, from_name, to_json, cc_json, bcc_json, subject, snippet, received_at, internal_date, labels_json, headers_json, body_plain, body_html, raw_json, created_at, updated_at, org_id, user_id)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?19, ?20, ?21)
                      ON CONFLICT(account_id, provider_message_id) DO UPDATE SET
                         thread_id = excluded.thread_id,
                         from_email = excluded.from_email,
@@ -141,7 +147,10 @@ impl MessageRepository {
                         body_plain = excluded.body_plain,
                         body_html = excluded.body_html,
                         raw_json = excluded.raw_json,
-                        updated_at = excluded.updated_at
+                        updated_at = excluded.updated_at,
+                        org_id = excluded.org_id,
+                        user_id = excluded.user_id
+                     WHERE messages.org_id = excluded.org_id AND messages.user_id = excluded.user_id
                      RETURNING {MESSAGE_COLUMNS}"
                 ),
                 params![
@@ -163,7 +172,9 @@ impl MessageRepository {
                     body_plain,
                     body_html,
                     raw_json,
-                    now
+                    now,
+                    org_id,
+                    user_id
                 ],
             )
             .await?;
@@ -176,6 +187,8 @@ impl MessageRepository {
 
     pub async fn get_by_provider_id(
         &self,
+        org_id: i64,
+        user_id: i64,
         account_id: &str,
         provider_message_id: &str,
     ) -> Result<Message, MessageError> {
@@ -183,9 +196,9 @@ impl MessageRepository {
         let mut rows = conn
             .query(
                 &format!(
-                    "SELECT {MESSAGE_COLUMNS} FROM messages WHERE account_id = ?1 AND provider_message_id = ?2"
+                    "SELECT {MESSAGE_COLUMNS} FROM messages WHERE org_id = ?1 AND user_id = ?2 AND account_id = ?3 AND provider_message_id = ?4"
                 ),
-                params![account_id, provider_message_id],
+                params![org_id, user_id, account_id, provider_message_id],
             )
             .await?;
 
@@ -197,14 +210,16 @@ impl MessageRepository {
 
     pub async fn exists(
         &self,
+        org_id: i64,
+        user_id: i64,
         account_id: &str,
         provider_message_id: &str,
     ) -> Result<bool, MessageError> {
         let conn = self.db.connection().await?;
         let mut rows = conn
             .query(
-                "SELECT 1 FROM messages WHERE account_id = ?1 AND provider_message_id = ?2 LIMIT 1",
-                params![account_id, provider_message_id],
+                "SELECT 1 FROM messages WHERE org_id = ?1 AND user_id = ?2 AND account_id = ?3 AND provider_message_id = ?4 LIMIT 1",
+                params![org_id, user_id, account_id, provider_message_id],
             )
             .await?;
 
@@ -223,6 +238,8 @@ fn row_to_message(row: Row) -> Result<Message, MessageError> {
     let raw_json: String = row.get(17)?;
     let created_at: String = row.get(18)?;
     let updated_at: String = row.get(19)?;
+    let org_id: i64 = row.get(20)?;
+    let user_id: i64 = row.get(21)?;
 
     Ok(Message {
         id: row.get(0)?,
@@ -251,6 +268,8 @@ fn row_to_message(row: Row) -> Result<Message, MessageError> {
         raw_json: serde_json::from_str(&raw_json)?,
         created_at: DateTime::parse_from_rfc3339(&created_at)?.with_timezone(&Utc),
         updated_at: DateTime::parse_from_rfc3339(&updated_at)?.with_timezone(&Utc),
+        org_id,
+        user_id,
     })
 }
 
@@ -266,6 +285,7 @@ fn to_rfc3339(value: DateTime<Utc>) -> String {
 mod tests {
     use super::*;
     use crate::accounts::{AccountConfig, AccountRepository, PubsubConfig};
+    use crate::constants::{DEFAULT_ORG_ID, DEFAULT_USER_ID};
     use crate::gmail::OAuthTokens;
     use crate::migrations::run_migrations;
     use crate::threads::ThreadRepository;
@@ -294,16 +314,24 @@ mod tests {
             pubsub: PubsubConfig::default(),
         };
 
-        repo.create("user@example.com", Some("User".into()), config)
-            .await
-            .expect("create account")
-            .id
+        repo.create(
+            DEFAULT_ORG_ID,
+            DEFAULT_USER_ID,
+            "user@example.com",
+            Some("User".into()),
+            config,
+        )
+        .await
+        .expect("create account")
+        .id
     }
 
     async fn seed_thread(db: &Database, account_id: &str, provider_thread_id: &str) -> String {
         let thread_repo = ThreadRepository::new(db.clone());
         let thread = thread_repo
             .upsert(
+                DEFAULT_ORG_ID,
+                DEFAULT_USER_ID,
                 account_id,
                 provider_thread_id,
                 Some("Subject".into()),
@@ -318,6 +346,8 @@ mod tests {
 
     fn sample_new_message(account_id: &str, thread_id: &str) -> NewMessage {
         NewMessage {
+            org_id: DEFAULT_ORG_ID,
+            user_id: DEFAULT_USER_ID,
             account_id: account_id.to_string(),
             thread_id: thread_id.to_string(),
             provider_message_id: "msg1".into(),
@@ -387,7 +417,12 @@ mod tests {
         repo.upsert(new_msg.clone()).await.expect("insert");
 
         let fetched = repo
-            .get_by_provider_id(&new_msg.account_id, &new_msg.provider_message_id)
+            .get_by_provider_id(
+                DEFAULT_ORG_ID,
+                DEFAULT_USER_ID,
+                &new_msg.account_id,
+                &new_msg.provider_message_id,
+            )
             .await
             .expect("fetch");
 
@@ -404,12 +439,65 @@ mod tests {
         repo.upsert(new_msg.clone()).await.expect("insert");
 
         let exists = repo
-            .exists(&new_msg.account_id, &new_msg.provider_message_id)
+            .exists(
+                DEFAULT_ORG_ID,
+                DEFAULT_USER_ID,
+                &new_msg.account_id,
+                &new_msg.provider_message_id,
+            )
             .await
             .expect("exists");
         assert!(exists);
 
-        let missing = repo.exists("account1", "missing").await.expect("exists");
+        let missing = repo
+            .exists(DEFAULT_ORG_ID, DEFAULT_USER_ID, "account1", "missing")
+            .await
+            .expect("exists");
         assert!(!missing);
+    }
+
+    #[tokio::test]
+    async fn message_queries_scope_to_org_and_user() {
+        let (repo, db, _dir) = setup_repo().await;
+        let account_id = seed_account(&db).await;
+        let thread_id = seed_thread(&db, &account_id, "thread1").await;
+        let new_msg = sample_new_message(&account_id, &thread_id);
+
+        let stored = repo.upsert(new_msg.clone()).await.expect("insert");
+        assert_eq!(stored.org_id, DEFAULT_ORG_ID);
+        assert_eq!(stored.user_id, DEFAULT_USER_ID);
+
+        let wrong_user = repo
+            .get_by_provider_id(
+                DEFAULT_ORG_ID,
+                DEFAULT_USER_ID + 1,
+                &new_msg.account_id,
+                &new_msg.provider_message_id,
+            )
+            .await
+            .expect_err("wrong user should not fetch");
+        assert!(matches!(wrong_user, MessageError::NotFound(_)));
+
+        let wrong_org = repo
+            .get_by_provider_id(
+                DEFAULT_ORG_ID + 1,
+                DEFAULT_USER_ID,
+                &new_msg.account_id,
+                &new_msg.provider_message_id,
+            )
+            .await
+            .expect_err("wrong org should not fetch");
+        assert!(matches!(wrong_org, MessageError::NotFound(_)));
+
+        let exists_wrong_user = repo
+            .exists(
+                DEFAULT_ORG_ID,
+                DEFAULT_USER_ID + 1,
+                &new_msg.account_id,
+                &new_msg.provider_message_id,
+            )
+            .await
+            .expect("exists wrong user");
+        assert!(!exists_wrong_user);
     }
 }

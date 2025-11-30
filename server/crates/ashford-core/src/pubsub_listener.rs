@@ -11,6 +11,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use crate::accounts::AccountRepository;
+use crate::constants::{DEFAULT_ORG_ID, DEFAULT_USER_ID};
 use crate::pubsub::{
     GmailNotification, PubsubError, parse_gmail_notification,
     subscriber_client_from_service_account,
@@ -173,7 +174,7 @@ async fn reconcile_listeners(
     shutdown: &CancellationToken,
     listeners: &mut HashMap<String, ListenerHandle>,
 ) -> Result<(), PubsubError> {
-    let accounts = repo.list_all().await?;
+    let accounts = repo.list_all(DEFAULT_ORG_ID, DEFAULT_USER_ID).await?;
 
     // Determine desired listeners based on account config.
     let mut desired: HashMap<String, DesiredListener> = HashMap::new();

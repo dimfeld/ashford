@@ -98,6 +98,8 @@ impl ActionLinkRelationType {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Decision {
     pub id: String,
+    pub org_id: i64,
+    pub user_id: i64,
     pub account_id: String,
     pub message_id: String,
     pub source: DecisionSource,
@@ -113,6 +115,8 @@ pub struct Decision {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NewDecision {
+    pub org_id: i64,
+    pub user_id: i64,
     pub account_id: String,
     pub message_id: String,
     pub source: DecisionSource,
@@ -127,6 +131,8 @@ pub struct NewDecision {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Action {
     pub id: String,
+    pub org_id: i64,
+    pub user_id: i64,
     pub account_id: String,
     pub message_id: String,
     pub decision_id: Option<String>,
@@ -143,6 +149,8 @@ pub struct Action {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NewAction {
+    pub org_id: i64,
+    pub user_id: i64,
     pub account_id: String,
     pub message_id: String,
     pub decision_id: Option<String>,

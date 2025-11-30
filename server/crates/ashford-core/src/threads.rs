@@ -6,7 +6,7 @@ use uuid::Uuid;
 
 use crate::db::{Database, DbError};
 
-const THREAD_COLUMNS: &str = "id, account_id, provider_thread_id, subject, snippet, last_message_at, metadata_json, raw_json, created_at, updated_at";
+const THREAD_COLUMNS: &str = "id, account_id, provider_thread_id, subject, snippet, last_message_at, metadata_json, raw_json, created_at, updated_at, org_id, user_id";
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Thread {
@@ -20,6 +20,8 @@ pub struct Thread {
     pub raw_json: Value,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    pub org_id: i64,
+    pub user_id: i64,
 }
 
 #[derive(Debug, Error)]
@@ -48,6 +50,8 @@ impl ThreadRepository {
 
     pub async fn upsert(
         &self,
+        org_id: i64,
+        user_id: i64,
         account_id: &str,
         provider_thread_id: &str,
         subject: Option<String>,
@@ -66,8 +70,8 @@ impl ThreadRepository {
         let mut rows = conn
             .query(
                 &format!(
-                    "INSERT INTO threads (id, account_id, provider_thread_id, subject, snippet, last_message_at, metadata_json, raw_json, created_at, updated_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)
+                    "INSERT INTO threads (id, account_id, provider_thread_id, subject, snippet, last_message_at, metadata_json, raw_json, created_at, updated_at, org_id, user_id)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9, ?10, ?11)
                      ON CONFLICT(account_id, provider_thread_id) DO UPDATE SET
                         subject = excluded.subject,
                         snippet = excluded.snippet,
@@ -79,7 +83,10 @@ impl ThreadRepository {
                         END,
                         metadata_json = threads.metadata_json,
                         raw_json = excluded.raw_json,
-                        updated_at = excluded.updated_at
+                        updated_at = excluded.updated_at,
+                        org_id = excluded.org_id,
+                        user_id = excluded.user_id
+                     WHERE threads.org_id = excluded.org_id AND threads.user_id = excluded.user_id
                      RETURNING {THREAD_COLUMNS}"
                 ),
                 params![
@@ -91,7 +98,9 @@ impl ThreadRepository {
                     last_message_at_str,
                     metadata_json_str,
                     raw_json_str,
-                    now
+                    now,
+                    org_id,
+                    user_id
                 ],
             )
             .await?;
@@ -104,6 +113,8 @@ impl ThreadRepository {
 
     pub async fn get_by_provider_id(
         &self,
+        org_id: i64,
+        user_id: i64,
         account_id: &str,
         provider_thread_id: &str,
     ) -> Result<Thread, ThreadError> {
@@ -111,9 +122,9 @@ impl ThreadRepository {
         let mut rows = conn
             .query(
                 &format!(
-                    "SELECT {THREAD_COLUMNS} FROM threads WHERE account_id = ?1 AND provider_thread_id = ?2"
+                    "SELECT {THREAD_COLUMNS} FROM threads WHERE org_id = ?1 AND user_id = ?2 AND account_id = ?3 AND provider_thread_id = ?4"
                 ),
-                params![account_id, provider_thread_id],
+                params![org_id, user_id, account_id, provider_thread_id],
             )
             .await?;
 
@@ -125,6 +136,8 @@ impl ThreadRepository {
 
     pub async fn update_last_message_at(
         &self,
+        org_id: i64,
+        user_id: i64,
         thread_id: &str,
         last_message_at: DateTime<Utc>,
     ) -> Result<Thread, ThreadError> {
@@ -141,10 +154,10 @@ impl ThreadRepository {
                         ELSE last_message_at
                      END,
                      updated_at = ?2
-                     WHERE id = ?3
+                     WHERE id = ?3 AND org_id = ?4 AND user_id = ?5
                      RETURNING {THREAD_COLUMNS}"
                 ),
-                params![last_message_at_str, now, thread_id],
+                params![last_message_at_str, now, thread_id, org_id, user_id],
             )
             .await?;
 
@@ -161,6 +174,8 @@ fn row_to_thread(row: Row) -> Result<Thread, ThreadError> {
     let raw_json: String = row.get(7)?;
     let created_at: String = row.get(8)?;
     let updated_at: String = row.get(9)?;
+    let org_id: i64 = row.get(10)?;
+    let user_id: i64 = row.get(11)?;
 
     Ok(Thread {
         id: row.get(0)?,
@@ -176,6 +191,8 @@ fn row_to_thread(row: Row) -> Result<Thread, ThreadError> {
         raw_json: serde_json::from_str(&raw_json)?,
         created_at: DateTime::parse_from_rfc3339(&created_at)?.with_timezone(&Utc),
         updated_at: DateTime::parse_from_rfc3339(&updated_at)?.with_timezone(&Utc),
+        org_id,
+        user_id,
     })
 }
 
@@ -191,6 +208,7 @@ fn to_rfc3339(value: DateTime<Utc>) -> String {
 mod tests {
     use super::*;
     use crate::accounts::{AccountConfig, AccountRepository, PubsubConfig};
+    use crate::constants::{DEFAULT_ORG_ID, DEFAULT_USER_ID};
     use crate::gmail::OAuthTokens;
     use crate::migrations::run_migrations;
     use tempfile::TempDir;
@@ -218,10 +236,16 @@ mod tests {
             pubsub: PubsubConfig::default(),
         };
 
-        repo.create("user@example.com", Some("User".into()), config)
-            .await
-            .expect("create account")
-            .id
+        repo.create(
+            DEFAULT_ORG_ID,
+            DEFAULT_USER_ID,
+            "user@example.com",
+            Some("User".into()),
+            config,
+        )
+        .await
+        .expect("create account")
+        .id
     }
 
     #[tokio::test]
@@ -230,6 +254,8 @@ mod tests {
         let account_id = seed_account(&db).await;
         let result = repo
             .upsert(
+                DEFAULT_ORG_ID,
+                DEFAULT_USER_ID,
                 &account_id,
                 "thread1",
                 Some("Subject".into()),
@@ -257,6 +283,8 @@ mod tests {
 
         let first = repo
             .upsert(
+                DEFAULT_ORG_ID,
+                DEFAULT_USER_ID,
                 &account_id,
                 "thread1",
                 Some("Subject".into()),
@@ -269,6 +297,8 @@ mod tests {
 
         let updated = repo
             .upsert(
+                DEFAULT_ORG_ID,
+                DEFAULT_USER_ID,
                 &account_id,
                 "thread1",
                 Some("New Subject".into()),
@@ -294,6 +324,8 @@ mod tests {
         let (repo, db, _dir) = setup_repo().await;
         let account_id = seed_account(&db).await;
         repo.upsert(
+            DEFAULT_ORG_ID,
+            DEFAULT_USER_ID,
             &account_id,
             "thread1",
             None,
@@ -305,7 +337,7 @@ mod tests {
         .expect("insert");
 
         let fetched = repo
-            .get_by_provider_id(&account_id, "thread1")
+            .get_by_provider_id(DEFAULT_ORG_ID, DEFAULT_USER_ID, &account_id, "thread1")
             .await
             .expect("fetch");
 
@@ -321,6 +353,8 @@ mod tests {
 
         let thread = repo
             .upsert(
+                DEFAULT_ORG_ID,
+                DEFAULT_USER_ID,
                 &account_id,
                 "thread1",
                 None,
@@ -332,7 +366,7 @@ mod tests {
             .expect("insert");
 
         let unchanged = repo
-            .update_last_message_at(&thread.id, earlier)
+            .update_last_message_at(DEFAULT_ORG_ID, DEFAULT_USER_ID, &thread.id, earlier)
             .await
             .expect("update earlier");
         assert_eq!(
@@ -341,9 +375,54 @@ mod tests {
         );
 
         let advanced = repo
-            .update_last_message_at(&thread.id, later + chrono::Duration::minutes(5))
+            .update_last_message_at(
+                DEFAULT_ORG_ID,
+                DEFAULT_USER_ID,
+                &thread.id,
+                later + chrono::Duration::minutes(5),
+            )
             .await
             .expect("update later");
         assert!(advanced.last_message_at.unwrap() > later);
+    }
+
+    #[tokio::test]
+    async fn thread_queries_are_scoped_to_org_and_user() {
+        let (repo, db, _dir) = setup_repo().await;
+        let account_id = seed_account(&db).await;
+        let thread = repo
+            .upsert(
+                DEFAULT_ORG_ID,
+                DEFAULT_USER_ID,
+                &account_id,
+                "thread1",
+                Some("Subject".into()),
+                None,
+                None,
+                serde_json::json!({}),
+            )
+            .await
+            .expect("create thread");
+
+        assert_eq!(thread.org_id, DEFAULT_ORG_ID);
+        assert_eq!(thread.user_id, DEFAULT_USER_ID);
+
+        let wrong_user = repo
+            .get_by_provider_id(DEFAULT_ORG_ID, DEFAULT_USER_ID + 1, &account_id, "thread1")
+            .await
+            .expect_err("wrong user should not fetch thread");
+        assert!(matches!(wrong_user, ThreadError::NotFound(_)));
+
+        let wrong_org = repo
+            .get_by_provider_id(DEFAULT_ORG_ID + 1, DEFAULT_USER_ID, &account_id, "thread1")
+            .await
+            .expect_err("wrong org should not fetch thread");
+        assert!(matches!(wrong_org, ThreadError::NotFound(_)));
+
+        let update_wrong_user = repo
+            .update_last_message_at(DEFAULT_ORG_ID, DEFAULT_USER_ID + 1, &thread.id, Utc::now())
+            .await
+            .expect_err("update with wrong user should fail");
+        assert!(matches!(update_wrong_user, ThreadError::NotFound(_)));
     }
 }
