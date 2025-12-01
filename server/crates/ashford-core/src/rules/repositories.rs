@@ -1,5 +1,6 @@
 use chrono::{DateTime, SecondsFormat, Utc};
 use libsql::{Row, params};
+use std::borrow::Cow;
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -109,6 +110,7 @@ impl DeterministicRuleRepository {
         let conditions_json = serde_json::to_string(&new_rule.conditions_json)?;
         let action_parameters_json = serde_json::to_string(&new_rule.action_parameters_json)?;
         let enabled = new_rule.enabled as i64;
+        let scope_ref = normalize_scope_ref(&new_rule.scope, &new_rule.scope_ref);
         let conn = self.db.connection().await?;
         let mut rows = conn
             .query(
@@ -123,7 +125,7 @@ impl DeterministicRuleRepository {
                     new_rule.name,
                     new_rule.description,
                     new_rule.scope.as_str(),
-                    new_rule.scope_ref,
+                    scope_ref,
                     new_rule.priority,
                     enabled,
                     conditions_json,
@@ -203,7 +205,20 @@ impl DeterministicRuleRepository {
     ) -> Result<Vec<DeterministicRule>, DeterministicRuleError> {
         let conn = self.db.connection().await?;
         let scope_value = scope.as_str();
-        let mut rows = if let Some(reference) = scope_ref {
+        let is_case_insensitive_scope = matches!(scope, RuleScope::Domain | RuleScope::Sender);
+        let normalized_ref: Option<Cow<'_, str>> = match (is_case_insensitive_scope, scope_ref) {
+            (true, Some(reference)) => Some(Cow::Owned(reference.to_lowercase())),
+            (false, Some(reference)) => Some(Cow::Borrowed(reference)),
+            (_, None) => None,
+        };
+
+        let mut rows = if let Some(reference) = normalized_ref.as_deref() {
+            let scope_ref_clause = if is_case_insensitive_scope {
+                "LOWER(scope_ref) = ?4"
+            } else {
+                "scope_ref = ?4"
+            };
+
             conn.query(
                 &format!(
                     "SELECT {DETERMINISTIC_RULE_COLUMNS}
@@ -212,7 +227,7 @@ impl DeterministicRuleRepository {
                        AND (user_id IS NULL OR user_id = ?2)
                        AND enabled = 1
                        AND scope = ?3
-                       AND scope_ref = ?4
+                       AND {scope_ref_clause}
                      ORDER BY priority ASC, created_at"
                 ),
                 params![org_id, user_id, scope_value, reference],
@@ -253,6 +268,7 @@ impl DeterministicRuleRepository {
         let conditions_json = serde_json::to_string(&updated.conditions_json)?;
         let action_parameters_json = serde_json::to_string(&updated.action_parameters_json)?;
         let enabled = updated.enabled as i64;
+        let scope_ref = normalize_scope_ref(&updated.scope, &updated.scope_ref);
         let conn = self.db.connection().await?;
         let mut rows = conn
             .query(
@@ -279,7 +295,7 @@ impl DeterministicRuleRepository {
                     updated.name,
                     updated.description,
                     updated.scope.as_str(),
-                    updated.scope_ref,
+                    scope_ref,
                     updated.priority,
                     enabled,
                     conditions_json,
@@ -319,6 +335,15 @@ impl DeterministicRuleRepository {
             Some(_) => Ok(()),
             None => Err(DeterministicRuleError::NotFound(id.to_string())),
         }
+    }
+}
+
+fn normalize_scope_ref(scope: &RuleScope, scope_ref: &Option<String>) -> Option<String> {
+    match scope {
+        RuleScope::Domain | RuleScope::Sender => {
+            scope_ref.as_ref().map(|value| value.to_lowercase())
+        }
+        _ => scope_ref.clone(),
     }
 }
 
@@ -1655,6 +1680,76 @@ mod tests {
             .await
             .expect("list nonexistent domain");
         assert_eq!(domain_nonexistent.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn deterministic_rule_list_enabled_by_scope_domain_is_case_insensitive() {
+        let (db, _dir) = setup_db().await;
+        let repo = DeterministicRuleRepository::new(db.clone());
+
+        repo.create(sample_new_det_rule(RuleScope::Domain, Some("example.com")))
+            .await
+            .expect("create domain rule");
+
+        // Query with mixed-case scope_ref should still match.
+        let domain_rules = repo
+            .list_enabled_by_scope(
+                DEFAULT_ORG_ID,
+                DEFAULT_USER_ID,
+                RuleScope::Domain,
+                Some("Example.COM"),
+            )
+            .await
+            .expect("list mixed case domain");
+
+        assert_eq!(domain_rules.len(), 1);
+        assert_eq!(
+            domain_rules[0].scope_ref.as_deref(),
+            Some("example.com"),
+            "domain scope_ref is normalized to lowercase on read"
+        );
+    }
+
+    #[tokio::test]
+    async fn deterministic_rule_list_enabled_by_scope_sender_matches_legacy_uppercase_ref() {
+        let (db, _dir) = setup_db().await;
+        let repo = DeterministicRuleRepository::new(db.clone());
+
+        let rule = repo
+            .create(sample_new_det_rule(
+                RuleScope::Sender,
+                Some("alice@example.com"),
+            ))
+            .await
+            .expect("create sender rule");
+
+        // Simulate legacy data where scope_ref was stored with different casing.
+        let conn = db.connection().await.expect("connection");
+        conn.execute(
+            "UPDATE deterministic_rules SET scope_ref = 'Alice@Example.COM' WHERE id = ?1",
+            params![rule.id],
+        )
+        .await
+        .expect("uppercase scope_ref");
+
+        let sender_rules = repo
+            .list_enabled_by_scope(
+                DEFAULT_ORG_ID,
+                DEFAULT_USER_ID,
+                RuleScope::Sender,
+                Some("alice@example.com"),
+            )
+            .await
+            .expect("list sender case-insensitive");
+
+        assert_eq!(sender_rules.len(), 1);
+        assert_eq!(
+            sender_rules[0]
+                .scope_ref
+                .as_deref()
+                .map(|s| s.to_ascii_lowercase()),
+            Some("alice@example.com".into())
+        );
     }
 
     #[tokio::test]

@@ -701,6 +701,7 @@ mod tests {
     use super::*;
     use crate::accounts::{AccountConfig, AccountRepository, PubsubConfig};
     use crate::constants::{DEFAULT_ORG_ID, DEFAULT_USER_ID};
+    use crate::gmail::types::Header;
     use crate::gmail::OAuthTokens;
     use crate::migrations::run_migrations;
     use crate::threads::ThreadRepository;
@@ -822,7 +823,10 @@ mod tests {
             received_at: Some(Utc::now()),
             internal_date: Some(Utc::now()),
             labels: vec!["INBOX".into()],
-            headers: serde_json::json!({"Header": "value"}),
+            headers: vec![Header {
+                name: "X-Custom".into(),
+                value: "value".into(),
+            }],
             body_plain: Some("Hi there".into()),
             body_html: Some("<p>Hi there</p>".into()),
             raw_json: serde_json::json!({"raw": true}),

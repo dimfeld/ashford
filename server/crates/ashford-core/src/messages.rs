@@ -6,6 +6,7 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::db::{Database, DbError};
+use crate::gmail::types::Header;
 
 const MESSAGE_COLUMNS: &str = "id, account_id, thread_id, provider_message_id, from_email, from_name, to_json, cc_json, bcc_json, subject, snippet, received_at, internal_date, labels_json, headers_json, body_plain, body_html, raw_json, created_at, updated_at, org_id, user_id";
 
@@ -31,7 +32,7 @@ pub struct Message {
     pub received_at: Option<DateTime<Utc>>,
     pub internal_date: Option<DateTime<Utc>>,
     pub labels: Vec<String>,
-    pub headers: Value,
+    pub headers: Vec<Header>,
     pub body_plain: Option<String>,
     pub body_html: Option<String>,
     pub raw_json: Value,
@@ -58,7 +59,7 @@ pub struct NewMessage {
     pub received_at: Option<DateTime<Utc>>,
     pub internal_date: Option<DateTime<Utc>>,
     pub labels: Vec<String>,
-    pub headers: Value,
+    pub headers: Vec<Header>,
     pub body_plain: Option<String>,
     pub body_html: Option<String>,
     pub raw_json: Value,
@@ -286,6 +287,7 @@ mod tests {
     use super::*;
     use crate::accounts::{AccountConfig, AccountRepository, PubsubConfig};
     use crate::constants::{DEFAULT_ORG_ID, DEFAULT_USER_ID};
+    use crate::gmail::types::Header;
     use crate::gmail::OAuthTokens;
     use crate::migrations::run_migrations;
     use crate::threads::ThreadRepository;
@@ -364,7 +366,10 @@ mod tests {
             received_at: Some(Utc::now()),
             internal_date: Some(Utc::now()),
             labels: vec!["INBOX".into()],
-            headers: serde_json::json!({"Header": "value"}),
+            headers: vec![Header {
+                name: "X-Custom".into(),
+                value: "value".into(),
+            }],
             body_plain: Some("Hi there".into()),
             body_html: Some("<p>Hi there</p>".into()),
             raw_json: serde_json::json!({"raw": true}),

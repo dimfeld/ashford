@@ -62,12 +62,11 @@ pub async fn handle_ingest_gmail(dispatcher: &JobDispatcher, job: Job) -> Result
 
     let raw_json = serde_json::to_value(&message)
         .map_err(|err| JobError::Fatal(format!("serialize message: {err}")))?;
-    let headers_value = message
+    let headers = message
         .payload
         .as_ref()
-        .map(|p| serde_json::to_value(&p.headers))
-        .transpose()
-        .map_err(|err| JobError::Fatal(format!("serialize headers: {err}")))?;
+        .map(|p| p.headers.clone())
+        .unwrap_or_default();
 
     let thread_repo = ThreadRepository::new(dispatcher.db.clone());
     let thread = thread_repo
@@ -122,7 +121,7 @@ pub async fn handle_ingest_gmail(dispatcher: &JobDispatcher, job: Job) -> Result
         received_at: last_message_at,
         internal_date: last_message_at,
         labels: message.label_ids.clone(),
-        headers: headers_value.unwrap_or_else(|| serde_json::json!([])),
+        headers,
         body_plain: parsed.body_plain,
         body_html: parsed.body_html,
         raw_json,

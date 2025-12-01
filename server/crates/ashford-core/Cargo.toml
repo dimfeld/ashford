@@ -29,6 +29,7 @@ google-cloud-pubsub = { version = "0.30.0", default-features = false, features =
 google-cloud-auth = { version = "0.17.2", default-features = false, features = ["rustls-tls"] }
 google-cloud-gax = "0.19.2"
 google-cloud-googleapis = "0.16.1"
+regex = "1.12.2"
 
 [dev-dependencies]
 once_cell = "1.19.0"
