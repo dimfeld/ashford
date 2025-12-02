@@ -27,6 +27,10 @@ static MIGRATIONS: &[Migration] = &[
         version: "004_add_org_user_columns",
         sql: include_str!("../../../migrations/004_add_org_user_columns.sql"),
     },
+    Migration {
+        version: "005_add_llm_calls",
+        sql: include_str!("../../../migrations/005_add_llm_calls.sql"),
+    },
 ];
 
 #[derive(Error, Debug)]
@@ -109,6 +113,7 @@ mod tests {
         assert!(table_exists(&conn, "accounts").await);
         assert!(table_exists(&conn, "jobs").await);
         assert!(table_exists(&conn, "rules_chat_messages").await);
+        assert!(table_exists(&conn, "llm_calls").await);
 
         let mut rows = conn
             .query(
@@ -148,7 +153,7 @@ mod tests {
             .expect("row value")
             .get(0)
             .expect("count");
-        assert_eq!(count, 4, "migrations should only record once each");
+        assert_eq!(count, 5, "migrations should only record once each");
     }
 
     #[tokio::test]

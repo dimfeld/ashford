@@ -81,7 +81,7 @@ pub async fn handle_ingest_gmail(dispatcher: &JobDispatcher, job: Job) -> Result
             raw_json.clone(),
         )
         .await
-        .map_err(|err| JobError::Retryable(format!("upsert thread failed: {err}")))?;
+        .map_err(|err| JobError::retryable(format!("upsert thread failed: {err}")))?;
 
     let msg_repo = MessageRepository::new(dispatcher.db.clone());
     let new_msg = NewMessage {
@@ -130,7 +130,7 @@ pub async fn handle_ingest_gmail(dispatcher: &JobDispatcher, job: Job) -> Result
     msg_repo
         .upsert(new_msg)
         .await
-        .map_err(|err| JobError::Retryable(format!("upsert message failed: {err}")))?;
+        .map_err(|err| JobError::retryable(format!("upsert message failed: {err}")))?;
 
     info!(
         account_id = %payload.account_id,
@@ -355,7 +355,9 @@ mod tests {
             .expect_err("ingest should retry on rate limit");
 
         match err {
-            JobError::Retryable(msg) => assert!(msg.contains("429") || msg.contains("rate")),
+            JobError::Retryable { message, .. } => {
+                assert!(message.contains("429") || message.contains("rate"))
+            }
             other => panic!("expected retryable, got {:?}", other),
         }
     }

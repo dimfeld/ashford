@@ -3,6 +3,10 @@ name = "ashford-core"
 version.workspace = true
 edition.workspace = true
 
+[features]
+default = []
+llm-integration = []
+
 [dependencies]
 config = { workspace = true }
 libsql = { workspace = true }
@@ -23,6 +27,7 @@ rand = { workspace = true }
 async-trait = { workspace = true }
 tokio-util = { workspace = true }
 futures = { workspace = true }
+genai = { workspace = true }
 reqwest = { version = "0.12.24", default-features = false, features = ["json", "rustls-tls", "gzip"] }
 base64 = "0.22.1"
 google-cloud-pubsub = { version = "0.30.0", default-features = false, features = ["auth", "google-cloud-auth", "rustls-tls"] }

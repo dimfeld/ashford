@@ -701,8 +701,8 @@ mod tests {
     use super::*;
     use crate::accounts::{AccountConfig, AccountRepository, PubsubConfig};
     use crate::constants::{DEFAULT_ORG_ID, DEFAULT_USER_ID};
-    use crate::gmail::types::Header;
     use crate::gmail::OAuthTokens;
+    use crate::gmail::types::Header;
     use crate::migrations::run_migrations;
     use crate::threads::ThreadRepository;
     use crate::{Mailbox, MessageRepository, NewMessage};

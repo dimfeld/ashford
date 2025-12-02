@@ -214,15 +214,18 @@ impl JobQueue {
         job_id: &str,
         error: String,
         should_retry: bool,
+        retry_after: Option<Duration>,
     ) -> Result<(), QueueError> {
         let job = self.fetch_job(job_id).await?;
         let now = now_rfc3339();
         let allow_retry = should_retry && job.attempts < job.max_attempts;
-        let next_not_before = allow_retry
-            .then(|| {
-                Utc::now() + chrono::Duration::from_std(backoff_with_jitter(job.attempts)).unwrap()
-            })
-            .map(|dt| dt.to_rfc3339_opts(SecondsFormat::Millis, true));
+        let next_not_before = if allow_retry {
+            let delay = retry_after.unwrap_or_else(|| backoff_with_jitter(job.attempts));
+            let scheduled = Utc::now() + chrono::Duration::from_std(delay).unwrap();
+            Some(scheduled.to_rfc3339_opts(SecondsFormat::Millis, true))
+        } else {
+            None
+        };
 
         let conn = self.db.connection().await?;
         let mut rows = conn
@@ -530,13 +533,41 @@ mod tests {
         assert_eq!(job.attempts, 1);
 
         queue
-            .fail(&id, "temporary".into(), true)
+            .fail(&id, "temporary".into(), true, None)
             .await
             .expect("fail");
 
         let updated = queue.fetch_job(&id).await.expect("fetch");
         assert_eq!(updated.state, JobState::Queued);
         assert!(updated.not_before.is_some());
+    }
+
+    #[tokio::test]
+    async fn fail_uses_explicit_retry_after_when_provided() {
+        let (queue, _dir) = setup_queue().await;
+        let id = queue
+            .enqueue("classify", json!({}), None, 0)
+            .await
+            .expect("enqueue");
+        let _job = queue.claim_next().await.expect("claim").expect("job");
+
+        queue
+            .fail(
+                &id,
+                "rate limited".into(),
+                true,
+                Some(Duration::from_millis(2000)),
+            )
+            .await
+            .expect("fail");
+
+        let updated = queue.fetch_job(&id).await.expect("fetch");
+        let not_before = updated.not_before.expect("retry should set not_before");
+        let millis = (not_before - Utc::now()).num_milliseconds();
+        assert!(
+            (1500..=2200).contains(&millis),
+            "expected not_before about 2s in future, got {millis}ms"
+        );
     }
 
     #[tokio::test]
@@ -557,7 +588,10 @@ mod tests {
         .expect("update max attempts");
 
         let _ = queue.claim_next().await.expect("claim").expect("job");
-        queue.fail(&id, "boom".into(), true).await.expect("fail");
+        queue
+            .fail(&id, "boom".into(), true, None)
+            .await
+            .expect("fail");
         let updated = queue.fetch_job(&id).await.expect("fetch");
         assert_eq!(updated.state, JobState::Failed);
         assert!(updated.not_before.is_none());

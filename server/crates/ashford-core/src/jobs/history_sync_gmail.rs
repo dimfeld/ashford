@@ -140,7 +140,7 @@ async fn enqueue_ingest_job(
             debug!(account_id, message_id, "ingest job already enqueued");
             Ok(())
         }
-        Err(err) => Err(JobError::Retryable(format!(
+        Err(err) => Err(JobError::retryable(format!(
             "enqueue ingest job failed: {err}"
         ))),
     }
@@ -195,7 +195,7 @@ async fn trigger_backfill(
             debug!(account_id = %account.id, "backfill job already enqueued");
         }
         Err(err) => {
-            return Err(JobError::Retryable(format!("enqueue backfill: {err}")));
+            return Err(JobError::retryable(format!("enqueue backfill: {err}")));
         }
     }
 
@@ -346,7 +346,9 @@ mod tests {
             .expect_err("history sync should retry on rate limit");
 
         match err {
-            JobError::Retryable(msg) => assert!(msg.contains("429") || msg.contains("rate")),
+            JobError::Retryable { message, .. } => {
+                assert!(message.contains("429") || message.contains("rate"))
+            }
             other => panic!("expected retryable, got {:?}", other),
         }
     }
@@ -643,7 +645,9 @@ mod tests {
             .expect_err("history sync should retry on 403 rate limit");
 
         match err {
-            JobError::Retryable(msg) => assert!(msg.contains("403") || msg.contains("rate")),
+            JobError::Retryable { message, .. } => {
+                assert!(message.contains("403") || message.contains("rate"))
+            }
             other => panic!("expected retryable, got {:?}", other),
         }
     }

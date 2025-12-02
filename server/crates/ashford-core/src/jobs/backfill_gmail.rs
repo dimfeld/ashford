@@ -130,7 +130,7 @@ async fn enqueue_ingest_job(
             debug!(account_id, message_id, "ingest job already enqueued");
             Ok(())
         }
-        Err(err) => Err(JobError::Retryable(format!(
+        Err(err) => Err(JobError::retryable(format!(
             "enqueue ingest job failed: {err}"
         ))),
     }
@@ -162,7 +162,7 @@ async fn enqueue_next_page(
             debug!(account_id, page_token, "backfill page already enqueued");
             Ok(())
         }
-        Err(err) => Err(JobError::Retryable(format!(
+        Err(err) => Err(JobError::retryable(format!(
             "enqueue next backfill page failed: {err}"
         ))),
     }
@@ -555,7 +555,9 @@ mod tests {
             .expect_err("should retry on rate limit");
 
         match err {
-            JobError::Retryable(msg) => assert!(msg.contains("429") || msg.contains("rate")),
+            JobError::Retryable { message, .. } => {
+                assert!(message.contains("429") || message.contains("rate"))
+            }
             other => panic!("expected retryable, got {:?}", other),
         }
     }
@@ -593,7 +595,9 @@ mod tests {
             .expect_err("should retry on 403");
 
         match err {
-            JobError::Retryable(msg) => assert!(msg.contains("403") || msg.contains("rate")),
+            JobError::Retryable { message, .. } => {
+                assert!(message.contains("403") || message.contains("rate"))
+            }
             other => panic!("expected retryable, got {:?}", other),
         }
     }
@@ -851,10 +855,12 @@ mod tests {
             .expect_err("should retry when get_profile fails");
 
         match err {
-            JobError::Retryable(msg) => {
+            JobError::Retryable { message, .. } => {
                 assert!(
-                    msg.contains("429") || msg.contains("rate") || msg.contains("get_profile"),
-                    "error message should indicate rate limit or get_profile failure: {msg}"
+                    message.contains("429")
+                        || message.contains("rate")
+                        || message.contains("get_profile"),
+                    "error message should indicate rate limit or get_profile failure: {message}"
                 );
             }
             other => panic!("expected retryable, got {:?}", other),

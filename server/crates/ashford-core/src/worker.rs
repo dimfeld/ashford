@@ -39,20 +39,44 @@ pub enum WorkerError {
 
 #[derive(Debug, Error)]
 pub enum JobError {
-    #[error("retryable: {0}")]
-    Retryable(String),
+    #[error("retryable: {message}")]
+    Retryable {
+        message: String,
+        retry_after: Option<Duration>,
+    },
     #[error("fatal: {0}")]
     Fatal(String),
 }
 
 impl JobError {
     pub fn is_retryable(&self) -> bool {
-        matches!(self, JobError::Retryable(_))
+        matches!(self, JobError::Retryable { .. })
     }
 
     fn message(&self) -> &str {
         match self {
-            JobError::Retryable(msg) | JobError::Fatal(msg) => msg,
+            JobError::Retryable { message, .. } | JobError::Fatal(message) => message,
+        }
+    }
+
+    pub fn retry_after(&self) -> Option<Duration> {
+        match self {
+            JobError::Retryable { retry_after, .. } => *retry_after,
+            JobError::Fatal(_) => None,
+        }
+    }
+
+    pub fn retryable(message: impl Into<String>) -> Self {
+        JobError::Retryable {
+            message: message.into(),
+            retry_after: None,
+        }
+    }
+
+    pub fn retryable_after(message: impl Into<String>, retry_after: Duration) -> Self {
+        JobError::Retryable {
+            message: message.into(),
+            retry_after: Some(retry_after),
         }
     }
 }
@@ -209,7 +233,7 @@ mod tests {
     #[async_trait]
     impl JobExecutor for RetryExecutor {
         async fn execute(&self, job: Job, _ctx: JobContext) -> Result<(), JobError> {
-            Err(JobError::Retryable(format!("retry {}", job.id)))
+            Err(JobError::retryable(format!("retry {}", job.id)))
         }
     }
 
@@ -249,6 +273,56 @@ mod tests {
         assert!(matches!(job.state, JobState::Queued));
         assert!(job.last_error.unwrap().contains("retry"));
         assert!(job.not_before.is_some());
+    }
+
+    struct RetryAfterExecutor;
+
+    #[async_trait]
+    impl JobExecutor for RetryAfterExecutor {
+        async fn execute(&self, job: Job, _ctx: JobContext) -> Result<(), JobError> {
+            Err(JobError::retryable_after(
+                format!("retry-after {}", job.id),
+                Duration::from_millis(400),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn worker_respects_retry_after_hint() {
+        let (queue, _dir) = setup_queue().await;
+        let job_id = queue
+            .enqueue("retry-after", json!({}), None, 0)
+            .await
+            .expect("enqueue");
+
+        let shutdown = CancellationToken::new();
+        let worker = tokio::spawn(run_worker(
+            queue.clone(),
+            RetryAfterExecutor,
+            fast_config(),
+            shutdown.clone(),
+        ));
+
+        timeout(Duration::from_secs(2), async {
+            loop {
+                let job = queue.fetch_job(&job_id).await.expect("fetch");
+                if matches!(job.state, JobState::Queued) && job.last_error.is_some() {
+                    let not_before = job.not_before.expect("retry should set not_before");
+                    let delta_ms = (not_before - job.updated_at).num_milliseconds();
+                    assert!(
+                        (300..=900).contains(&delta_ms),
+                        "expected retry-after to set ~400ms delay, got {delta_ms}ms",
+                    );
+                    break;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("job should be requeued with retry-after");
+
+        shutdown.cancel();
+        let _ = worker.await;
     }
 
     struct FatalExecutor;
@@ -569,6 +643,7 @@ async fn handle_job<E: JobExecutor>(
         Ok(Err(job_err)) => FinalizeAction::Fail {
             message: job_err.message().to_string(),
             retry: job_err.is_retryable(),
+            retry_after: job_err.retry_after(),
         },
         Err(panic) => {
             let err_msg = if let Some(msg) = panic.downcast_ref::<&str>() {
@@ -582,6 +657,7 @@ async fn handle_job<E: JobExecutor>(
             FinalizeAction::Fail {
                 message: err_msg,
                 retry: true,
+                retry_after: None,
             }
         }
     };
@@ -605,7 +681,11 @@ async fn handle_job<E: JobExecutor>(
 
 enum FinalizeAction {
     Complete,
-    Fail { message: String, retry: bool },
+    Fail {
+        message: String,
+        retry: bool,
+        retry_after: Option<Duration>,
+    },
 }
 
 async fn finalize_job(
@@ -656,8 +736,14 @@ async fn finalize_job(
 
         let result = match &action {
             FinalizeAction::Complete => queue.complete(&job.id, None).await,
-            FinalizeAction::Fail { message, retry } => {
-                queue.fail(&job.id, message.clone(), *retry).await
+            FinalizeAction::Fail { message, retry, .. } => {
+                let retry_after = match &action {
+                    FinalizeAction::Fail { retry_after, .. } => *retry_after,
+                    FinalizeAction::Complete => None,
+                };
+                queue
+                    .fail(&job.id, message.clone(), *retry, retry_after)
+                    .await
             }
         };
 

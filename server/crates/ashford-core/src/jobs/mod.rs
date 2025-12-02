@@ -4,6 +4,7 @@ use reqwest::StatusCode;
 use crate::accounts::AccountError;
 use crate::gmail::GmailClientError;
 use crate::gmail::oauth::OAuthError;
+use crate::llm::LLMError;
 use crate::worker::{JobError, JobExecutor};
 use crate::{Database, Job, JobContext};
 
@@ -55,7 +56,7 @@ impl JobExecutor for JobDispatcher {
 
 pub(crate) fn map_gmail_error(context: &str, err: GmailClientError) -> JobError {
     match err {
-        GmailClientError::Unauthorized => JobError::Retryable(format!("{context}: unauthorized")),
+        GmailClientError::Unauthorized => JobError::retryable(format!("{context}: unauthorized")),
         GmailClientError::Http(ref http_err) => {
             if let Some(status) = http_err.status() {
                 match status {
@@ -64,25 +65,55 @@ pub(crate) fn map_gmail_error(context: &str, err: GmailClientError) -> JobError 
                     }
                     StatusCode::TOO_MANY_REQUESTS | StatusCode::FORBIDDEN => {
                         // 429 is explicit rate limit; 403 often indicates userRateLimitExceeded
-                        JobError::Retryable(format!("{context}: rate limited ({status})"))
+                        JobError::retryable(format!("{context}: rate limited ({status})"))
                     }
                     StatusCode::UNAUTHORIZED => {
-                        JobError::Retryable(format!("{context}: unauthorized (401)"))
+                        JobError::retryable(format!("{context}: unauthorized (401)"))
                     }
                     status if status.is_server_error() => {
-                        JobError::Retryable(format!("{context}: server error {status}"))
+                        JobError::retryable(format!("{context}: server error {status}"))
                     }
                     status => JobError::Fatal(format!("{context}: http status {status}")),
                 }
             } else {
-                JobError::Retryable(format!("{context}: network error {http_err}"))
+                JobError::retryable(format!("{context}: network error {http_err}"))
             }
         }
         GmailClientError::OAuth(err) => {
-            JobError::Retryable(format!("{context}: oauth error {err}"))
+            JobError::retryable(format!("{context}: oauth error {err}"))
         }
         GmailClientError::TokenStore(err) => JobError::Fatal(format!("{context}: {err}")),
         GmailClientError::Decode(err) => JobError::Fatal(format!("{context}: {err}")),
+    }
+}
+
+#[allow(dead_code)]
+pub(crate) fn map_llm_error(context: &str, err: LLMError) -> JobError {
+    match err {
+        LLMError::RateLimited(info) => {
+            let detail = info
+                .retry_after_ms
+                .map(|ms| format!(" (retry after {ms}ms)"))
+                .unwrap_or_default();
+            let message = format!("{context}: rate limited{detail}");
+            if let Some(ms) = info.retry_after_ms {
+                JobError::retryable_after(message, std::time::Duration::from_millis(ms))
+            } else {
+                JobError::retryable(message)
+            }
+        }
+        LLMError::AuthenticationFailed => {
+            JobError::Fatal(format!("{context}: authentication failed"))
+        }
+        LLMError::InvalidRequest(msg) => {
+            JobError::Fatal(format!("{context}: invalid request {msg}"))
+        }
+        LLMError::ServerError(msg) => JobError::retryable(format!("{context}: server error {msg}")),
+        LLMError::Timeout => JobError::retryable(format!("{context}: timeout")),
+        LLMError::ParseError(msg) => JobError::Fatal(format!("{context}: parse error {msg}")),
+        LLMError::ProviderError(msg) => {
+            JobError::retryable(format!("{context}: provider error {msg}"))
+        }
     }
 }
 
@@ -92,10 +123,10 @@ pub(crate) fn map_account_error(context: &str, err: AccountError) -> JobError {
         AccountError::OAuth(OAuthError::MissingRefreshToken) => {
             JobError::Fatal(format!("{context}: missing refresh token for account"))
         }
-        AccountError::OAuth(err) => JobError::Retryable(format!("{context}: oauth error {err}")),
-        AccountError::Conflict(_) => JobError::Retryable(format!("{context}: optimistic conflict")),
-        AccountError::Database(err) => JobError::Retryable(format!("{context}: db error {err}")),
-        AccountError::Sql(err) => JobError::Retryable(format!("{context}: db error {err}")),
+        AccountError::OAuth(err) => JobError::retryable(format!("{context}: oauth error {err}")),
+        AccountError::Conflict(_) => JobError::retryable(format!("{context}: optimistic conflict")),
+        AccountError::Database(err) => JobError::retryable(format!("{context}: db error {err}")),
+        AccountError::Sql(err) => JobError::retryable(format!("{context}: db error {err}")),
         AccountError::Json(err) => JobError::Fatal(format!("{context}: decode error {err}")),
         AccountError::DateTimeParse(err) => {
             JobError::Fatal(format!("{context}: decode error {err}"))
@@ -137,6 +168,61 @@ mod tests {
         match result {
             Err(JobError::Fatal(msg)) => assert!(msg.contains("unknown job type")),
             other => panic!("expected fatal error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn map_llm_error_marks_retryable_cases() {
+        let context = "llm call";
+        let retryable = vec![
+            (
+                LLMError::RateLimited(crate::llm::error::RateLimitInfo::new(Some(1500))),
+                "rate limited (retry after 1500ms)",
+                Some(std::time::Duration::from_millis(1500)),
+            ),
+            (LLMError::ServerError("500".into()), "server error", None),
+            (LLMError::Timeout, "timeout", None),
+            (
+                LLMError::ProviderError("transient".into()),
+                "provider error",
+                None,
+            ),
+        ];
+
+        for (err, expected, expected_retry_after) in retryable {
+            match map_llm_error(context, err) {
+                JobError::Retryable {
+                    message,
+                    retry_after,
+                } => {
+                    assert!(
+                        message.contains(expected),
+                        "expected retryable message to contain {expected}, got {message}"
+                    );
+                    assert_eq!(retry_after, expected_retry_after);
+                }
+                other => panic!("expected retryable, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn map_llm_error_marks_fatal_cases() {
+        let context = "llm call";
+        let fatal = vec![
+            (LLMError::AuthenticationFailed, "authentication failed"),
+            (LLMError::InvalidRequest("bad".into()), "invalid request"),
+            (LLMError::ParseError("json".into()), "parse error"),
+        ];
+
+        for (err, expected) in fatal {
+            match map_llm_error(context, err) {
+                JobError::Fatal(msg) => assert!(
+                    msg.contains(expected),
+                    "expected fatal message to contain {expected}, got {msg}"
+                ),
+                other => panic!("expected fatal, got {other:?}"),
+            }
         }
     }
 
