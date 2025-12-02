@@ -50,7 +50,13 @@ Example:
     [policy]
     approval_always = ["delete","forward","auto_reply","escalate"]
     confidence_default = 0.7
-    
+```
+
+The `[policy]` section configures safety enforcement behavior:
+- **approval_always**: Action types (snake_case) that always require Discord approval regardless of confidence or danger level
+- **confidence_default**: Threshold (0.0-1.0) below which LLM decisions require approval
+
+These values are also the defaults used by `PolicyConfig::default()` in Rust.
 
 **Env overrides (examples)**
     

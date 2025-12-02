@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -8,6 +9,7 @@ use super::{CompletionRequest, CompletionResponse, LLMClient, LLMError, LlmCallC
 #[derive(Debug, Default, Clone)]
 pub struct MockLLMClient {
     responses: Arc<Mutex<VecDeque<Result<CompletionResponse, LLMError>>>>,
+    call_count: Arc<AtomicUsize>,
 }
 
 impl MockLLMClient {
@@ -19,6 +21,11 @@ impl MockLLMClient {
         let mut guard = self.responses.lock().expect("lock responses");
         guard.push_back(response);
     }
+
+    /// Returns the number of times `complete` has been called.
+    pub fn call_count(&self) -> usize {
+        self.call_count.load(Ordering::SeqCst)
+    }
 }
 
 #[async_trait]
@@ -28,6 +35,7 @@ impl LLMClient for MockLLMClient {
         _request: CompletionRequest,
         _context: LlmCallContext,
     ) -> Result<CompletionResponse, LLMError> {
+        self.call_count.fetch_add(1, Ordering::SeqCst);
         let mut guard = self.responses.lock().expect("lock responses");
         guard.pop_front().unwrap_or_else(|| {
             Err(LLMError::ProviderError(
@@ -103,5 +111,35 @@ mod tests {
         assert!(
             matches!(result, Err(LLMError::ProviderError(msg)) if msg.contains("mock response not provided"))
         );
+    }
+
+    #[tokio::test]
+    async fn call_count_tracks_invocations() {
+        let mock = MockLLMClient::new();
+        let response = CompletionResponse {
+            content: "ok".into(),
+            model: "model".into(),
+            input_tokens: 1,
+            output_tokens: 1,
+            latency_ms: 10,
+            tool_calls: vec![],
+        };
+        mock.enqueue_response(Ok(response.clone()));
+        mock.enqueue_response(Ok(response));
+
+        let request = CompletionRequest {
+            messages: vec![],
+            temperature: 0.0,
+            max_tokens: 0,
+            json_mode: false,
+            tools: vec![],
+        };
+        let context = LlmCallContext::new("test");
+
+        assert_eq!(mock.call_count(), 0);
+        let _ = mock.complete(request.clone(), context.clone()).await;
+        assert_eq!(mock.call_count(), 1);
+        let _ = mock.complete(request, context).await;
+        assert_eq!(mock.call_count(), 2);
     }
 }

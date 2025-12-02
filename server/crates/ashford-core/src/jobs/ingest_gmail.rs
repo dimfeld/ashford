@@ -2,13 +2,14 @@ use std::sync::Arc;
 
 use chrono::{DateTime, TimeZone, Utc};
 use serde::Deserialize;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::accounts::AccountRepository;
 use crate::constants::{DEFAULT_ORG_ID, DEFAULT_USER_ID};
 use crate::gmail::{GmailClient, NoopTokenStore, parse_message};
-use crate::jobs::{JobDispatcher, map_account_error, map_gmail_error};
+use crate::jobs::{JOB_TYPE_CLASSIFY, JobDispatcher, map_account_error, map_gmail_error};
 use crate::messages::{Mailbox, MessageRepository, NewMessage};
+use crate::queue::{JobQueue, QueueError};
 use crate::threads::ThreadRepository;
 use crate::{Job, JobError};
 
@@ -127,10 +128,13 @@ pub async fn handle_ingest_gmail(dispatcher: &JobDispatcher, job: Job) -> Result
         raw_json,
     };
 
-    msg_repo
+    let persisted_msg = msg_repo
         .upsert(new_msg)
         .await
         .map_err(|err| JobError::retryable(format!("upsert message failed: {err}")))?;
+
+    // Enqueue classify job for the persisted message
+    enqueue_classify_job(dispatcher, &payload.account_id, &persisted_msg.id).await?;
 
     info!(
         account_id = %payload.account_id,
@@ -161,11 +165,40 @@ fn parse_internal_date(internal_date: &Option<String>) -> Result<Option<DateTime
     }
 }
 
+async fn enqueue_classify_job(
+    dispatcher: &JobDispatcher,
+    account_id: &str,
+    message_id: &str,
+) -> Result<(), JobError> {
+    let queue = JobQueue::new(dispatcher.db.clone());
+    let payload = serde_json::json!({
+        "account_id": account_id,
+        "message_id": message_id,
+    });
+    let idempotency_key = format!("{JOB_TYPE_CLASSIFY}:{account_id}:{message_id}");
+
+    match queue
+        .enqueue(JOB_TYPE_CLASSIFY, payload, Some(idempotency_key), 0)
+        .await
+    {
+        Ok(_) => Ok(()),
+        Err(QueueError::DuplicateIdempotency { .. }) => {
+            debug!(account_id, message_id, "classify job already enqueued");
+            Ok(())
+        }
+        Err(err) => Err(JobError::retryable(format!(
+            "enqueue classify job failed: {err}"
+        ))),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::accounts::{AccountConfig, PubsubConfig};
+    use crate::config::PolicyConfig;
     use crate::gmail::OAuthTokens;
+    use crate::llm::MockLLMClient;
     use crate::migrations::run_migrations;
     use crate::queue::JobQueue;
     use base64::Engine;
@@ -204,7 +237,12 @@ mod tests {
             .await
             .expect("create account");
 
-        let dispatcher = JobDispatcher::new(db.clone(), reqwest::Client::new());
+        let dispatcher = JobDispatcher::new(
+            db.clone(),
+            reqwest::Client::new(),
+            Arc::new(MockLLMClient::new()),
+            PolicyConfig::default(),
+        );
         (repo, dispatcher, dir, account.id)
     }
 
@@ -286,6 +324,36 @@ mod tests {
         assert_eq!(stored.to.len(), 1);
         assert_eq!(stored.body_plain.as_deref(), Some("Hello world"));
         assert_eq!(stored.body_html.as_deref(), Some("<p>Hello world</p>"));
+
+        // Verify classify job was enqueued
+        let conn = dispatcher.db.connection().await.expect("conn");
+        let mut rows = conn
+            .query(
+                "SELECT payload_json, priority FROM jobs WHERE type = ?1",
+                libsql::params![crate::jobs::JOB_TYPE_CLASSIFY],
+            )
+            .await
+            .expect("query");
+        let row = rows
+            .next()
+            .await
+            .expect("row")
+            .expect("classify job exists");
+        let payload: String = row.get(0).expect("payload");
+        let priority: i64 = row.get(1).expect("priority");
+
+        // Verify payload contains correct account_id and message_id (internal UUID)
+        let payload_value: serde_json::Value =
+            serde_json::from_str(&payload).expect("parse payload");
+        assert_eq!(
+            payload_value["account_id"].as_str(),
+            Some(account_id.as_str())
+        );
+        assert_eq!(
+            payload_value["message_id"].as_str(),
+            Some(stored.id.as_str())
+        );
+        assert_eq!(priority, 0, "classify job should have priority 0");
     }
 
     #[tokio::test]
@@ -403,5 +471,121 @@ mod tests {
             JobError::Fatal(msg) => assert!(msg.contains("thread_id")),
             other => panic!("unexpected error: {:?}", other),
         }
+    }
+
+    #[tokio::test]
+    async fn ingest_does_not_enqueue_classify_on_failure() {
+        let (_repo, dispatcher, _dir, account_id) = setup_account().await;
+        let queue = JobQueue::new(dispatcher.db.clone());
+
+        let server = MockServer::start().await;
+        let api_base = format!("{}/gmail/v1/users", &server.uri());
+        let dispatcher = dispatcher.with_gmail_api_base(api_base);
+
+        // Return 404 to simulate Gmail API failure
+        Mock::given(method("GET"))
+            .and(path(
+                "/gmail/v1/users/user@example.com/messages/missing-msg",
+            ))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        let job_id = queue
+            .enqueue(
+                crate::jobs::JOB_TYPE_INGEST_GMAIL,
+                json!({"account_id": account_id, "message_id": "missing-msg"}),
+                None,
+                1,
+            )
+            .await
+            .expect("enqueue job");
+        let job = queue.fetch_job(&job_id).await.expect("fetch job");
+
+        // Ingest should fail
+        let err = handle_ingest_gmail(&dispatcher, job)
+            .await
+            .expect_err("ingest should fail on 404");
+        assert!(matches!(err, JobError::Fatal(_)));
+
+        // Verify no classify job was enqueued
+        let conn = dispatcher.db.connection().await.expect("conn");
+        let mut rows = conn
+            .query(
+                "SELECT COUNT(*) FROM jobs WHERE type = ?1",
+                libsql::params![crate::jobs::JOB_TYPE_CLASSIFY],
+            )
+            .await
+            .expect("query");
+        let count: i64 = rows.next().await.unwrap().unwrap().get(0).unwrap();
+        assert_eq!(count, 0, "no classify job should be enqueued on failure");
+    }
+
+    #[tokio::test]
+    async fn ingest_handles_duplicate_classify_idempotency() {
+        let (_repo, dispatcher, _dir, account_id) = setup_account().await;
+        let queue = JobQueue::new(dispatcher.db.clone());
+
+        let server = MockServer::start().await;
+        let api_base = format!("{}/gmail/v1/users", &server.uri());
+        let dispatcher = dispatcher.with_gmail_api_base(api_base);
+
+        Mock::given(method("GET"))
+            .and(path("/gmail/v1/users/user@example.com/messages/msg-dup"))
+            .respond_with(ResponseTemplate::new(200).set_body_json({
+                let mut resp = build_message_response();
+                resp["id"] = json!("msg-dup");
+                resp
+            }))
+            .expect(2) // Called twice
+            .mount(&server)
+            .await;
+
+        // First ingest
+        let job_id = queue
+            .enqueue(
+                crate::jobs::JOB_TYPE_INGEST_GMAIL,
+                json!({"account_id": account_id.clone(), "message_id": "msg-dup"}),
+                None,
+                1,
+            )
+            .await
+            .expect("enqueue job");
+        let job = queue.fetch_job(&job_id).await.expect("fetch job");
+        handle_ingest_gmail(&dispatcher, job)
+            .await
+            .expect("first ingest succeeds");
+
+        // Second ingest of the same message (simulating re-processing)
+        let job_id2 = queue
+            .enqueue(
+                crate::jobs::JOB_TYPE_INGEST_GMAIL,
+                json!({"account_id": account_id, "message_id": "msg-dup"}),
+                None,
+                1,
+            )
+            .await
+            .expect("enqueue job 2");
+        let job2 = queue.fetch_job(&job_id2).await.expect("fetch job 2");
+
+        // Second ingest should also succeed (duplicate idempotency handled gracefully)
+        handle_ingest_gmail(&dispatcher, job2)
+            .await
+            .expect("second ingest succeeds");
+
+        // Verify only one classify job exists (due to idempotency)
+        let conn = dispatcher.db.connection().await.expect("conn");
+        let mut rows = conn
+            .query(
+                "SELECT COUNT(*) FROM jobs WHERE type = ?1",
+                libsql::params![crate::jobs::JOB_TYPE_CLASSIFY],
+            )
+            .await
+            .expect("query");
+        let count: i64 = rows.next().await.unwrap().unwrap().get(0).unwrap();
+        assert_eq!(
+            count, 1,
+            "only one classify job should exist due to idempotency"
+        );
     }
 }

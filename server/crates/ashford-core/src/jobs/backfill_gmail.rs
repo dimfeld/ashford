@@ -211,7 +211,9 @@ mod tests {
     use super::*;
     use crate::Database;
     use crate::accounts::{AccountConfig, PubsubConfig};
+    use crate::config::PolicyConfig;
     use crate::gmail::OAuthTokens;
+    use crate::llm::MockLLMClient;
     use crate::migrations::run_migrations;
     use serde_json::json;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -249,7 +251,12 @@ mod tests {
             .expect("create account");
 
         let queue = JobQueue::new(db.clone());
-        let dispatcher = JobDispatcher::new(db.clone(), reqwest::Client::new());
+        let dispatcher = JobDispatcher::new(
+            db.clone(),
+            reqwest::Client::new(),
+            Arc::new(MockLLMClient::new()),
+            PolicyConfig::default(),
+        );
         (repo, dispatcher, queue, dir, account.id)
     }
 

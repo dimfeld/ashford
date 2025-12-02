@@ -226,6 +226,28 @@ impl MessageRepository {
 
         Ok(rows.next().await?.is_some())
     }
+
+    pub async fn get_by_id(
+        &self,
+        org_id: i64,
+        user_id: i64,
+        message_id: &str,
+    ) -> Result<Message, MessageError> {
+        let conn = self.db.connection().await?;
+        let mut rows = conn
+            .query(
+                &format!(
+                    "SELECT {MESSAGE_COLUMNS} FROM messages WHERE org_id = ?1 AND user_id = ?2 AND id = ?3"
+                ),
+                params![org_id, user_id, message_id],
+            )
+            .await?;
+
+        match rows.next().await? {
+            Some(row) => row_to_message(row),
+            None => Err(MessageError::NotFound(message_id.to_string())),
+        }
+    }
 }
 
 fn row_to_message(row: Row) -> Result<Message, MessageError> {
@@ -504,5 +526,55 @@ mod tests {
             .await
             .expect("exists wrong user");
         assert!(!exists_wrong_user);
+    }
+
+    #[tokio::test]
+    async fn get_by_id_fetches_message() {
+        let (repo, db, _dir) = setup_repo().await;
+        let account_id = seed_account(&db).await;
+        let thread_id = seed_thread(&db, &account_id, "thread1").await;
+        let new_msg = sample_new_message(&account_id, &thread_id);
+        let stored = repo.upsert(new_msg.clone()).await.expect("insert");
+
+        let fetched = repo
+            .get_by_id(DEFAULT_ORG_ID, DEFAULT_USER_ID, &stored.id)
+            .await
+            .expect("fetch");
+
+        assert_eq!(fetched.id, stored.id);
+        assert_eq!(fetched.provider_message_id, new_msg.provider_message_id);
+        assert_eq!(fetched.thread_id, new_msg.thread_id);
+    }
+
+    #[tokio::test]
+    async fn get_by_id_returns_not_found_for_missing() {
+        let (repo, _db, _dir) = setup_repo().await;
+
+        let result = repo
+            .get_by_id(DEFAULT_ORG_ID, DEFAULT_USER_ID, "nonexistent-id")
+            .await;
+
+        assert!(matches!(result, Err(MessageError::NotFound(_))));
+    }
+
+    #[tokio::test]
+    async fn get_by_id_scopes_to_org_and_user() {
+        let (repo, db, _dir) = setup_repo().await;
+        let account_id = seed_account(&db).await;
+        let thread_id = seed_thread(&db, &account_id, "thread1").await;
+        let new_msg = sample_new_message(&account_id, &thread_id);
+        let stored = repo.upsert(new_msg.clone()).await.expect("insert");
+
+        let wrong_user = repo
+            .get_by_id(DEFAULT_ORG_ID, DEFAULT_USER_ID + 1, &stored.id)
+            .await
+            .expect_err("wrong user should not fetch");
+        assert!(matches!(wrong_user, MessageError::NotFound(_)));
+
+        let wrong_org = repo
+            .get_by_id(DEFAULT_ORG_ID + 1, DEFAULT_USER_ID, &stored.id)
+            .await
+            .expect_err("wrong org should not fetch");
+        assert!(matches!(wrong_org, MessageError::NotFound(_)));
     }
 }

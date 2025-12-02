@@ -4,6 +4,7 @@ Document Index:
 
 Project Overview: overview.md
 Rules Engine: rules_engine.md
+Decision Engine: decision_engine.md
 Rules Assistant UI: rules_assistant.md
 Job Queue: job_queue.md
 Gmail Integration: gmail_integration.md

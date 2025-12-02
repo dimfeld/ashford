@@ -81,6 +81,11 @@ CREATE INDEX messages_thread_idx
 CREATE INDEX messages_from_idx
   ON messages(account_id, from_email);
 
+**Repository Methods:**
+
+- `get_by_id(org_id, user_id, message_id)` - Fetch by internal UUID
+- `get_by_provider_id(org_id, user_id, account_id, provider_message_id)` - Fetch by Gmail message ID
+- `upsert(message)` - Insert or update message, returns the persisted Message with internal ID
 
 ⸻
 

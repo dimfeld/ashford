@@ -79,6 +79,20 @@ pub struct PolicyConfig {
     pub confidence_default: f32,
 }
 
+impl Default for PolicyConfig {
+    fn default() -> Self {
+        Self {
+            approval_always: vec![
+                "delete".to_string(),
+                "forward".to_string(),
+                "auto_reply".to_string(),
+                "escalate".to_string(),
+            ],
+            confidence_default: 0.7,
+        }
+    }
+}
+
 #[derive(Error, Debug)]
 pub enum ConfigError {
     #[error("failed to read configuration file: {0}")]

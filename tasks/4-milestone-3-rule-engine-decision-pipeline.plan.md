@@ -6,7 +6,7 @@ goal: Implement the three-layer rule system (deterministic rules, directions,
 id: 4
 uuid: 5cf4cc37-3eb8-4f89-adae-421a751d13a1
 generatedBy: agent
-status: in_progress
+status: done
 priority: high
 container: false
 temp: false
@@ -18,8 +18,6 @@ dependencies:
   - 16
   - 17
   - 18
-  - 20
-  - 21
 parent: 1
 references: {}
 issue: []

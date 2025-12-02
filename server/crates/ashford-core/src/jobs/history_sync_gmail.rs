@@ -206,7 +206,9 @@ async fn trigger_backfill(
 mod tests {
     use super::*;
     use crate::accounts::{AccountConfig, PubsubConfig};
+    use crate::config::PolicyConfig;
     use crate::gmail::OAuthTokens;
+    use crate::llm::MockLLMClient;
     use crate::migrations::run_migrations;
     use serde_json::json;
     use tempfile::TempDir;
@@ -243,7 +245,12 @@ mod tests {
             .await
             .expect("create account");
 
-        let dispatcher = JobDispatcher::new(db.clone(), reqwest::Client::new());
+        let dispatcher = JobDispatcher::new(
+            db.clone(),
+            reqwest::Client::new(),
+            Arc::new(MockLLMClient::new()),
+            PolicyConfig::default(),
+        );
         (repo, dispatcher, dir, account.id)
     }
 

@@ -1,8 +1,10 @@
+use std::sync::Arc;
 use std::{env, net::SocketAddr};
 
 use ashford_core::pubsub_listener::run_pubsub_supervisor;
 use ashford_core::{
-    Config, Database, JobDispatcher, JobQueue, WorkerConfig, init_telemetry, migrations, run_worker,
+    Config, Database, GenaiLLMClient, JobDispatcher, JobQueue, WorkerConfig, init_telemetry,
+    migrations, run_worker,
 };
 use axum::{Json, Router, extract::State, http::StatusCode, routing::get};
 use serde::Serialize;
@@ -25,7 +27,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     migrations::run_migrations(&db).await?;
 
     let queue = JobQueue::new(db.clone());
-    let dispatcher = JobDispatcher::new(db.clone(), reqwest::Client::new());
+    let llm_client = Arc::new(GenaiLLMClient::new(db.clone(), config.model.clone()));
+    let dispatcher = JobDispatcher::new(
+        db.clone(),
+        reqwest::Client::new(),
+        llm_client,
+        config.policy.clone(),
+    );
     let shutdown = CancellationToken::new();
     let worker_shutdown = shutdown.child_token();
     let worker_handle = tokio::spawn(run_worker(

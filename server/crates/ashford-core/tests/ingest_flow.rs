@@ -1,11 +1,12 @@
+use std::sync::Arc;
 use std::time::Duration;
 
 use ashford_core::gmail::OAuthTokens;
 use ashford_core::migrations::run_migrations;
 use ashford_core::{
     AccountConfig, AccountRepository, Database, JOB_TYPE_HISTORY_SYNC_GMAIL, JOB_TYPE_INGEST_GMAIL,
-    JobDispatcher, JobQueue, MessageError, MessageRepository, PubsubConfig, ThreadRepository,
-    WorkerConfig,
+    JobDispatcher, JobQueue, MessageError, MessageRepository, MockLLMClient, PolicyConfig,
+    PubsubConfig, ThreadRepository, WorkerConfig,
     constants::{DEFAULT_ORG_ID, DEFAULT_USER_ID},
     run_worker,
 };
@@ -100,8 +101,13 @@ async fn worker_processes_history_and_ingests_message() {
 
     let server = MockServer::start().await;
     let api_base = format!("{}/gmail/v1/users", &server.uri());
-    let dispatcher =
-        JobDispatcher::new(db.clone(), reqwest::Client::new()).with_gmail_api_base(api_base);
+    let dispatcher = JobDispatcher::new(
+        db.clone(),
+        reqwest::Client::new(),
+        Arc::new(MockLLMClient::new()),
+        PolicyConfig::default(),
+    )
+    .with_gmail_api_base(api_base);
 
     Mock::given(method("GET"))
         .and(path("/gmail/v1/users/user@example.com/history"))
@@ -188,8 +194,13 @@ async fn worker_deduplicates_ingest_for_same_message() {
 
     let server = MockServer::start().await;
     let api_base = format!("{}/gmail/v1/users", &server.uri());
-    let dispatcher =
-        JobDispatcher::new(db.clone(), reqwest::Client::new()).with_gmail_api_base(api_base);
+    let dispatcher = JobDispatcher::new(
+        db.clone(),
+        reqwest::Client::new(),
+        Arc::new(MockLLMClient::new()),
+        PolicyConfig::default(),
+    )
+    .with_gmail_api_base(api_base);
 
     Mock::given(method("GET"))
         .and(path("/gmail/v1/users/user@example.com/history"))
