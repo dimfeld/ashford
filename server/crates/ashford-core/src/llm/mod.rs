@@ -11,9 +11,13 @@ pub use decision::{
 };
 pub use error::{LLMError, RateLimitInfo};
 pub use mock::MockLLMClient;
-pub use prompt::{build_decision_tool, PromptBuilder, PromptBuilderConfig, ThreadContext, DECISION_TOOL_NAME};
+pub use prompt::{
+    DECISION_TOOL_NAME, PromptBuilder, PromptBuilderConfig, ThreadContext, build_decision_tool,
+};
 pub use repository::{LlmCall, LlmCallContext, LlmCallError, LlmCallRepository, NewLlmCall};
-pub use types::{ChatMessage, ChatRole, CompletionRequest, CompletionResponse, Tool, ToolCall, ToolCallResult};
+pub use types::{
+    ChatMessage, ChatRole, CompletionRequest, CompletionResponse, Tool, ToolCall, ToolCallResult,
+};
 
 use std::sync::Arc;
 use std::time::Instant;

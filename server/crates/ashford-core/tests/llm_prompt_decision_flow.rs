@@ -1,8 +1,8 @@
 use ashford_core::gmail::types::Header;
 use ashford_core::llm::{
-    ActionType, ChatRole, DecisionDetails, DecisionOutput, DecisionParseError, Explanations,
-    MessageRef, PromptBuilder, TelemetryPlaceholder, ToolCallResult, UndoHint,
-    build_decision_tool, DECISION_TOOL_NAME,
+    ActionType, ChatRole, DECISION_TOOL_NAME, DecisionDetails, DecisionOutput, DecisionParseError,
+    Explanations, MessageRef, PromptBuilder, TelemetryPlaceholder, ToolCallResult, UndoHint,
+    build_decision_tool,
 };
 use ashford_core::messages::{Mailbox, Message};
 use ashford_core::rules::types::{Direction, LlmRule, RuleScope};

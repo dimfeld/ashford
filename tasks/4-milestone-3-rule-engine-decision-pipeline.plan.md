@@ -19,6 +19,7 @@ dependencies:
   - 17
   - 18
   - 20
+  - 21
 parent: 1
 references: {}
 issue: []
@@ -29,7 +30,7 @@ docs:
 planGeneratedAt: 2025-11-29T01:23:12.069Z
 promptsGeneratedAt: 2025-11-29T01:23:12.069Z
 createdAt: 2025-11-29T01:21:26.793Z
-updatedAt: 2025-12-02T07:44:10.853Z
+updatedAt: 2025-12-02T18:34:52.629Z
 progressNotes: []
 tasks:
   - title: Define condition tree schema

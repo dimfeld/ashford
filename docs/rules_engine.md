@@ -175,12 +175,15 @@ The model generates:
 
 Step 5 — Rust Enforcement
 
-Rust validates and post-processes the decision:
-	1.	Apply Direction enforcement
-	2.	Apply Dangerous Action Policy
-	3.	Enforce confidence thresholds
-	4.	Persist decision
-	5.	Enqueue next job (auto-run or approval request)
+Rust validates and post-processes the decision using `SafetyEnforcer`:
+	1.	**Danger Level Check**: Dangerous actions (Delete, Forward, AutoReply, Escalate) always require approval
+	2.	**Confidence Threshold**: If confidence < `policy.confidence_default`, require approval
+	3.	**approval_always List**: Actions in `policy.approval_always` always require approval
+	4.	**LLM Advisory**: Honor LLM's `needs_approval` flag if set to true
+	5.	Persist decision with safety telemetry (overrides applied)
+	6.	Enqueue next job (auto-run safe actions or create Discord approval request)
+
+See `server/crates/ashford-core/src/decisions/safety.rs` for implementation details.
 
 ⸻
 

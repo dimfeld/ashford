@@ -175,18 +175,103 @@ The decision contract remains the same as defined earlier in the spec, represent
 
 After receiving the model output:
 	1.	Validate JSON strictly (schema validation + semantic validation).
-	2.	Apply Directions on the Rust side as a safety override:
-	•	If model suggests a forbidden action → downgrade to safe fallback (e.g., mark_unread) or mark as requiring approval.
-	3.	Apply “Dangerous Action Policy”:
-	•	If action is destructive and not whitelisted by deterministic rules → require Discord approval.
-	4.	Calculate effective confidence thresholds:
-	•	If model confidence < global threshold → convert to “needs approval”.
-	5.	Persist decisions record.
-	6.	Enqueue next job:
+	2.	Apply Safety Enforcement via `SafetyEnforcer`:
+	•	Check danger level, confidence, approval_always list, and LLM advisory flag.
+	•	Dangerous actions always require approval.
+	3.	Persist decisions record with safety telemetry.
+	4.	Enqueue next job:
 	•	Auto-run safe actions, or
 	•	Create an approval request for Discord.
 
 This guarantees deterministic, auditable behavior even when the LLM output is imperfect.
+
+#### SafetyEnforcer
+
+The `SafetyEnforcer` struct validates LLM decisions against policy constraints. It is implemented in `server/crates/ashford-core/src/decisions/safety.rs`.
+
+```rust
+use ashford_core::{SafetyEnforcer, PolicyConfig, DecisionOutput};
+
+let enforcer = SafetyEnforcer::new(policy_config);
+let result = enforcer.enforce(&decision_output);
+
+if result.requires_approval {
+    // Route to Discord approval flow
+    for override_reason in &result.overrides_applied {
+        println!("Approval required: {}", override_reason);
+    }
+}
+```
+
+#### Action Danger Levels
+
+All action types are classified by danger level (`ActionDangerLevel` enum):
+
+| Level | Actions | Behavior |
+|-------|---------|----------|
+| **Safe** | ApplyLabel, MarkRead, MarkUnread, Archive, Move, None | Auto-execute |
+| **Reversible** | Star, Unstar, Snooze, AddNote, CreateTask | Auto-execute with undo hint |
+| **Dangerous** | Delete, Forward, AutoReply, Escalate | Always requires approval |
+
+Access via `ActionType::danger_level()`:
+
+```rust
+use ashford_core::ActionType;
+
+let action = ActionType::Delete;
+assert_eq!(action.danger_level(), ActionDangerLevel::Dangerous);
+```
+
+#### Safety Override Reasons
+
+When the enforcer requires approval, it captures all applicable reasons as `SafetyOverride` variants:
+
+- **DangerousAction**: Action is classified as `ActionDangerLevel::Dangerous`
+- **LowConfidence { confidence, threshold }**: Decision confidence is below the configured threshold
+- **InApprovalAlwaysList**: Action type is in the `approval_always` config list
+- **LlmRequestedApproval**: The LLM's advisory `needs_approval` flag was true
+
+Multiple overrides can apply simultaneously. The logic uses OR semantics—if any condition triggers, approval is required.
+
+#### Enforcement Logic
+
+The enforcer applies these checks in order, collecting all applicable overrides:
+
+1. **Danger Level Check**: If `action.danger_level() == Dangerous` → add `DangerousAction` override
+2. **Confidence Threshold**: If `confidence < policy.confidence_default` → add `LowConfidence` override
+3. **approval_always List**: If action type string (snake_case) is in `policy.approval_always` → add `InApprovalAlwaysList` override
+4. **LLM Advisory Flag**: If `decision.needs_approval == true` → add `LlmRequestedApproval` override
+
+The LLM's advisory flag is always honored—if the LLM requests approval, we respect it even if policy would allow auto-execution.
+
+#### Telemetry Integration
+
+Safety overrides are recorded in decision telemetry for audit purposes:
+
+```rust
+let telemetry_json = result.to_telemetry_json();
+// {
+//   "safety_overrides": ["DangerousAction", "LowConfidence (0.45 < 0.70)"],
+//   "requires_approval": true
+// }
+```
+
+This is stored in the `telemetry_json` field of the decisions table.
+
+#### Configuration
+
+Safety policy is configured via `PolicyConfig` in `config.toml`:
+
+```toml
+[policy]
+approval_always = ["delete", "forward", "auto_reply", "escalate"]
+confidence_default = 0.7
+```
+
+- **approval_always**: Action type strings (snake_case) that always require approval regardless of danger level or confidence
+- **confidence_default**: Threshold below which approval is required (0.0 to 1.0)
+
+Note: Direction violation detection is deferred to a future plan (LLM-Based Direction Violation Detection).
 
 ⸻
 
@@ -198,7 +283,12 @@ Each classifier run records:
 	•	Input/output token counts
 	•	Prompt size
 	•	Decision result
-	•	Safety overrides applied
+	•	Safety overrides applied (from `SafetyResult::to_telemetry_json()`)
+
+Safety telemetry includes:
+- List of all `SafetyOverride` reasons that triggered approval requirements
+- Human-readable descriptions for audit trail (e.g., "Action is dangerous", "Confidence 0.45 below threshold 0.70")
+- Final `requires_approval` determination
 
 This allows deep debugging and post-hoc safety audits.
 

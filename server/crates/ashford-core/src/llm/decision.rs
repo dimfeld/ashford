@@ -5,6 +5,7 @@ use std::str::FromStr;
 use thiserror::Error;
 
 use super::types::ToolCallResult;
+use crate::decisions::policy::ActionDangerLevel;
 
 /// Supported actions that the LLM may return.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -45,6 +46,36 @@ impl ActionType {
             ActionType::AddNote => "add_note",
             ActionType::Escalate => "escalate",
             ActionType::None => "none",
+        }
+    }
+
+    /// Returns the danger level classification for this action type.
+    ///
+    /// - Safe: ApplyLabel, MarkRead, MarkUnread, Archive, Move, None
+    /// - Reversible: Star, Unstar, Snooze, AddNote, CreateTask
+    /// - Dangerous: Delete, Forward, AutoReply, Escalate
+    pub fn danger_level(&self) -> ActionDangerLevel {
+        match self {
+            // Safe actions - unlikely to cause harm
+            ActionType::ApplyLabel
+            | ActionType::MarkRead
+            | ActionType::MarkUnread
+            | ActionType::Archive
+            | ActionType::Move
+            | ActionType::None => ActionDangerLevel::Safe,
+
+            // Reversible actions - can be easily undone
+            ActionType::Star
+            | ActionType::Unstar
+            | ActionType::Snooze
+            | ActionType::AddNote
+            | ActionType::CreateTask => ActionDangerLevel::Reversible,
+
+            // Dangerous actions - difficult or impossible to undo
+            ActionType::Delete
+            | ActionType::Forward
+            | ActionType::AutoReply
+            | ActionType::Escalate => ActionDangerLevel::Dangerous,
         }
     }
 }
@@ -546,7 +577,8 @@ mod tests {
     #[test]
     fn parse_from_tool_calls_errors_on_empty() {
         let tool_calls: Vec<ToolCallResult> = vec![];
-        let err = DecisionOutput::parse_from_tool_calls(&tool_calls, "record_decision").unwrap_err();
+        let err =
+            DecisionOutput::parse_from_tool_calls(&tool_calls, "record_decision").unwrap_err();
         assert_eq!(err, DecisionParseError::NoToolCall);
     }
 
@@ -559,7 +591,8 @@ mod tests {
             fn_arguments: serde_json::to_value(&decision).unwrap(),
         }];
 
-        let err = DecisionOutput::parse_from_tool_calls(&tool_calls, "record_decision").unwrap_err();
+        let err =
+            DecisionOutput::parse_from_tool_calls(&tool_calls, "record_decision").unwrap_err();
         assert_eq!(
             err,
             DecisionParseError::WrongToolName {
@@ -579,7 +612,8 @@ mod tests {
             fn_arguments: serde_json::to_value(&decision).unwrap(),
         }];
 
-        let err = DecisionOutput::parse_from_tool_calls(&tool_calls, "record_decision").unwrap_err();
+        let err =
+            DecisionOutput::parse_from_tool_calls(&tool_calls, "record_decision").unwrap_err();
         assert!(matches!(err, DecisionParseError::Validation(_)));
     }
 
@@ -591,7 +625,89 @@ mod tests {
             fn_arguments: serde_json::json!({"invalid": "structure"}),
         }];
 
-        let err = DecisionOutput::parse_from_tool_calls(&tool_calls, "record_decision").unwrap_err();
+        let err =
+            DecisionOutput::parse_from_tool_calls(&tool_calls, "record_decision").unwrap_err();
         assert!(matches!(err, DecisionParseError::Json(_)));
+    }
+
+    #[test]
+    fn action_type_danger_level_classifications() {
+        // Safe actions
+        for action in [
+            ActionType::ApplyLabel,
+            ActionType::MarkRead,
+            ActionType::MarkUnread,
+            ActionType::Archive,
+            ActionType::Move,
+            ActionType::None,
+        ] {
+            assert_eq!(
+                action.danger_level(),
+                ActionDangerLevel::Safe,
+                "{:?} should be Safe",
+                action
+            );
+        }
+
+        // Reversible actions
+        for action in [
+            ActionType::Star,
+            ActionType::Unstar,
+            ActionType::Snooze,
+            ActionType::AddNote,
+            ActionType::CreateTask,
+        ] {
+            assert_eq!(
+                action.danger_level(),
+                ActionDangerLevel::Reversible,
+                "{:?} should be Reversible",
+                action
+            );
+        }
+
+        // Dangerous actions
+        for action in [
+            ActionType::Delete,
+            ActionType::Forward,
+            ActionType::AutoReply,
+            ActionType::Escalate,
+        ] {
+            assert_eq!(
+                action.danger_level(),
+                ActionDangerLevel::Dangerous,
+                "{:?} should be Dangerous",
+                action
+            );
+        }
+    }
+
+    #[test]
+    fn all_action_types_have_danger_level() {
+        // Ensure every ActionType variant has a danger level (compilation check)
+        // This test will fail to compile if a new variant is added without updating danger_level()
+        let all_actions = [
+            ActionType::ApplyLabel,
+            ActionType::MarkRead,
+            ActionType::MarkUnread,
+            ActionType::Archive,
+            ActionType::Delete,
+            ActionType::Move,
+            ActionType::Star,
+            ActionType::Unstar,
+            ActionType::Forward,
+            ActionType::AutoReply,
+            ActionType::CreateTask,
+            ActionType::Snooze,
+            ActionType::AddNote,
+            ActionType::Escalate,
+            ActionType::None,
+        ];
+
+        // All 15 action types should have a danger level
+        assert_eq!(all_actions.len(), 15);
+        for action in all_actions {
+            // This should not panic - just confirm we get a valid danger level
+            let _ = action.danger_level();
+        }
     }
 }

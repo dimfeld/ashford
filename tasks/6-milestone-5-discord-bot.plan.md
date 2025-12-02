@@ -78,3 +78,17 @@ Discord integration for approvals and logging:
 - Signed payload validation with expiry
 - discord_whitelist table management
 - Trace ID correlation in Discord messages
+
+## Future Enhancement: Safer Action Alternatives
+
+When presenting dangerous actions for approval, consider offering safer alternatives as additional options. For example:
+
+- **Delete** action could show: `[Approve Delete] [Archive Instead] [Reject]`
+- **Forward** action could show: `[Approve Forward] [Reject]`
+
+This would require:
+1. Metadata on ActionType indicating a safer fallback action (e.g., Delete → Archive)
+2. Additional button in the approval embed for "Do safer action instead"
+3. Handler that creates a new action with the safer alternative
+
+This keeps the safety enforcement layer (Plan 17) simple - it only gates with `needs_approval = true` - while putting the downgrade decision in the user's hands at approval time.
