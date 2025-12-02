@@ -1,4 +1,8 @@
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+// Re-export genai tool types for convenience
+pub use genai::chat::{Tool, ToolCall};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -14,12 +18,27 @@ pub struct ChatMessage {
     pub content: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompletionRequest {
     pub messages: Vec<ChatMessage>,
     pub temperature: f32,
     pub max_tokens: u32,
     pub json_mode: bool,
+    /// Optional tools for the LLM to call. When provided, the LLM may return
+    /// tool calls instead of or in addition to text content.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<Tool>,
+}
+
+// Manual PartialEq implementation that ignores tools (genai::Tool doesn't implement PartialEq)
+impl PartialEq for CompletionRequest {
+    fn eq(&self, other: &Self) -> bool {
+        self.messages == other.messages
+            && (self.temperature - other.temperature).abs() < f32::EPSILON
+            && self.max_tokens == other.max_tokens
+            && self.json_mode == other.json_mode
+            && self.tools.len() == other.tools.len()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -29,6 +48,20 @@ pub struct CompletionResponse {
     pub input_tokens: u32,
     pub output_tokens: u32,
     pub latency_ms: u64,
+    /// Tool calls returned by the LLM, if any.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<ToolCallResult>,
+}
+
+/// Simplified tool call result that owns its data.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ToolCallResult {
+    /// Stable identifier for this tool call
+    pub call_id: String,
+    /// Name of the function to invoke
+    pub fn_name: String,
+    /// JSON arguments payload as provided by the model
+    pub fn_arguments: Value,
 }
 
 #[cfg(test)]
@@ -80,6 +113,7 @@ mod tests {
             temperature: 0.7,
             max_tokens: 256,
             json_mode: true,
+            tools: vec![],
         };
 
         let value = to_value(&request).expect("serialize");
@@ -106,10 +140,24 @@ mod tests {
             input_tokens: 42,
             output_tokens: 7,
             latency_ms: 1234,
+            tool_calls: vec![],
         };
 
         let value = to_value(&response).expect("serialize");
         let decoded: CompletionResponse = serde_json::from_value(value).expect("deserialize");
         assert_eq!(decoded, response);
+    }
+
+    #[test]
+    fn tool_call_result_round_trips_through_json() {
+        let tool_call = ToolCallResult {
+            call_id: "call_123".to_string(),
+            fn_name: "record_decision".to_string(),
+            fn_arguments: json!({"action": "archive", "confidence": 0.9}),
+        };
+
+        let value = to_value(&tool_call).expect("serialize");
+        let decoded: ToolCallResult = serde_json::from_value(value).expect("deserialize");
+        assert_eq!(decoded, tool_call);
     }
 }

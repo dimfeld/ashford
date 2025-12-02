@@ -18,15 +18,19 @@ dependencies:
   - 16
   - 17
   - 18
+  - 20
 parent: 1
+references: {}
 issue: []
+pullRequest: []
 docs:
   - docs/rules_engine.md
   - docs/data_model.md
 planGeneratedAt: 2025-11-29T01:23:12.069Z
 promptsGeneratedAt: 2025-11-29T01:23:12.069Z
 createdAt: 2025-11-29T01:21:26.793Z
-updatedAt: 2025-11-30T01:25:26.781Z
+updatedAt: 2025-12-02T07:44:10.853Z
+progressNotes: []
 tasks:
   - title: Define condition tree schema
     done: false

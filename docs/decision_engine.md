@@ -59,13 +59,13 @@ Layer 1 — SYSTEM Message
 Defines the agent role and output contract. Example:
 
 You are the email classification and action engine.
-Your task is to produce a single JSON decision object following the required schema.
+You MUST call the `record_decision` tool to provide your classification decision.
 You MUST follow the DIRECTIONS section strictly.
 You MUST NOT hallucinate.
 If uncertain, choose a safe and reversible action.
 
 This message also enforces:
-	•	Required output JSON schema.
+	•	Tool call requirement (structured output via tool calling).
 	•	Reversibility considerations.
 	•	The rule that classification must be grounded in message content and configured rules.
 
@@ -137,24 +137,28 @@ Body (plain): ...
 
 Layer 5 — TASK Directive
 
-The final section specifies what the model must output:
-	•	The JSON structure (the decision contract)
-	•	Constraints (e.g., “confidence must be [0.0, 1.0]”, “use None when no action”, etc.)
+The final section specifies what the model must do:
+	•	Call the `record_decision` tool with the decision
+	•	Lists valid action types
+	•	Constraints (e.g., "confidence must be [0.0, 1.0]", "use None when no action", etc.)
 	•	Safety notes
 	•	Approvals logic (advisory)
 
 Example:
 
 TASK:
-Based on the DIRECTIONS and LLM RULES, evaluate the email and output a single JSON object with:
-- decision.action
-- decision.parameters
-- decision.confidence
-- decision.needs_approval
-- rationale
-- explanations
-- undo_hint
-- telemetry placeholder
+Analyze this email and call the `record_decision` tool with your classification decision.
+
+Valid action types: apply_label, mark_read, mark_unread, archive, delete, ...
+
+Requirements:
+- Confidence MUST be between 0.0 and 1.0 inclusive.
+- If the action is destructive and confidence is low, set needs_approval to true.
+- Ensure undo_hint.inverse_action can reverse the primary decision.
+- You MUST call the record_decision tool - do not return plain text.
+
+Note: The JSON schema for the decision is provided via the tool definition, not inline in the prompt.
+This uses structured generation via tool calling for more reliable output.
 
 
 ⸻
@@ -271,4 +275,290 @@ Rust side:
 
 - Define strict structs and deserialize with serde_json.
 - Validate fields; treat needs_approval as advisory.
+
+### **10.3 Rust Implementation**
+
+The LLM Decision Engine implementation is split into two modules:
+- `server/crates/ashford-core/src/llm/decision.rs` - Decision types and parsing
+- `server/crates/ashford-core/src/llm/prompt.rs` - 5-layer prompt construction
+
+#### Prompt Builder
+
+The `PromptBuilder` constructs the 5-layer prompt from message context, directions, and LLM rules:
+
+```rust
+use ashford_core::llm::{PromptBuilder, PromptBuilderConfig, ThreadContext};
+
+// Create with default configuration
+let builder = PromptBuilder::new();
+
+// Or customize limits
+let builder = PromptBuilder::with_config(PromptBuilderConfig {
+    max_body_length: Some(8000),    // Default: 8000 chars
+    max_subject_length: Some(500),  // Default: 500 chars
+});
+
+// Build the prompt messages
+let messages = builder.build(
+    &message,       // &Message - the email to classify
+    &directions,    // &[Direction] - enabled global guardrails
+    &llm_rules,     // &[LlmRule] - applicable LLM rules
+    None,           // Option<&ThreadContext> - reserved for future thread summaries
+);
+```
+
+The `build()` method returns a `Vec<ChatMessage>` with exactly 2 messages:
+1. **System message** (ChatRole::System) - role definition, output contract, safety guidelines
+2. **User message** (ChatRole::User) - combined DIRECTIONS, LLM RULES, MESSAGE CONTEXT, and TASK sections
+
+##### Body Text Processing
+
+The prompt builder includes utilities for safely processing email content:
+
+- **`truncate_text(text, max_len)`** - Truncates at word boundaries with "..." suffix
+- **`strip_html(html)`** - Uses `html2text` crate for robust HTML-to-text conversion, handling entities, scripts, and tables
+- **`get_body_text(message, max_len)`** - Prefers body_plain, falls back to stripped body_html
+- **`filter_relevant_headers(headers)`** - Whitelists: List-Id, Return-Path, X-Priority, X-Mailer, Reply-To, Precedence
+
+##### Empty Sections
+
+When directions or LLM rules are empty, those sections are omitted entirely from the prompt (not included as empty sections).
+
+##### Message Context Format
+
+The MESSAGE CONTEXT section includes:
+- From/To/CC/BCC with name and email formatting
+- Subject (truncated to max_subject_length)
+- Snippet
+- Filtered headers
+- Labels as JSON array
+- Body text (truncated, HTML stripped if needed)
+
+##### Thread Context
+
+`ThreadContext` is a placeholder struct for future thread summaries. Currently always pass `None` for this parameter.
+
+#### ActionType Enum
+
+All supported action types are defined as a Rust enum with snake_case serialization:
+
+```rust
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ActionType {
+    ApplyLabel,
+    MarkRead,
+    MarkUnread,
+    Archive,
+    Delete,
+    Move,
+    Star,
+    Unstar,
+    Forward,
+    AutoReply,
+    CreateTask,
+    Snooze,
+    AddNote,
+    Escalate,
+    None,
+}
+```
+
+The enum provides `as_str()` for string conversion and implements `FromStr` for parsing. The `JsonSchema` derive enables automatic JSON Schema generation for tool calling.
+
+#### Decision Structs
+
+The complete decision contract is represented by these Rust structs. All types derive `JsonSchema` from the `schemars` crate for automatic JSON Schema generation:
+
+```rust
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct DecisionOutput {
+    pub message_ref: MessageRef,
+    pub decision: DecisionDetails,
+    pub explanations: Explanations,
+    pub undo_hint: UndoHint,
+    pub telemetry: TelemetryPlaceholder,
+}
+
+pub struct MessageRef {
+    pub provider: String,
+    pub account_id: String,
+    pub thread_id: String,
+    pub message_id: String,
+}
+
+pub struct DecisionDetails {
+    pub action: ActionType,
+    pub parameters: Value,  // serde_json::Value for flexibility
+    pub confidence: f64,
+    pub needs_approval: bool,
+    pub rationale: String,
+}
+
+pub struct Explanations {
+    pub salient_features: Vec<String>,
+    pub matched_directions: Vec<String>,
+    pub considered_alternatives: Vec<ConsideredAlternative>,
+}
+
+pub struct ConsideredAlternative {
+    pub action: ActionType,
+    pub confidence: f64,
+    pub why_not: String,
+}
+
+pub struct UndoHint {
+    pub inverse_action: ActionType,
+    pub inverse_parameters: Value,
+}
+
+pub struct TelemetryPlaceholder {}  // Empty; telemetry populated by Rust side
+```
+
+#### Validation
+
+`DecisionOutput::validate()` enforces these constraints:
+
+- **Required string fields** must be non-empty: `message_ref.provider`, `message_ref.account_id`, `message_ref.thread_id`, `message_ref.message_id`, `decision.rationale`
+- **Confidence** must be in range `[0.0, 1.0]` for both the primary decision and all considered alternatives
+- **Considered alternatives** must have non-empty `why_not` explanations
+
+Validation errors are represented by `DecisionValidationError`:
+
+```rust
+pub enum DecisionValidationError {
+    EmptyField(&'static str),
+    InvalidConfidence(f64),
+    InvalidAlternativeConfidence { index: usize, confidence: f64 },
+}
+```
+
+#### JSON Extraction
+
+LLM responses may contain extra text or markdown formatting around the JSON. The `extract_json_from_response()` function handles:
+
+1. **Code fences**: Extracts content from ` ```json ... ``` ` or ` ``` ... ``` ` blocks
+2. **Surrounding text**: Finds the first `{` and matches balanced braces
+3. **Escaped braces**: Correctly handles `{` and `}` inside JSON strings
+
+Example responses that are handled:
+
+```
+Sure, here is the decision:
+```json
+{"message_ref": {...}, "decision": {...}}
+```
+
+The decision object is valid.
+```
+
+#### Tool Definition
+
+The `build_decision_tool()` function creates a tool definition with the JSON Schema derived from the Rust types:
+
+```rust
+use ashford_core::llm::{build_decision_tool, DECISION_TOOL_NAME};
+
+// Build the tool with auto-generated JSON schema
+let tool = build_decision_tool();
+
+// The tool name is "record_decision"
+assert_eq!(tool.name, DECISION_TOOL_NAME);
+
+// Add the tool to your completion request
+let request = CompletionRequest {
+    messages,
+    temperature: 0.1,
+    max_tokens: 4096,
+    json_mode: false,  // Not needed with tool calling
+    tools: vec![tool],
+};
+```
+
+#### Parsing
+
+There are two methods for parsing LLM responses:
+
+**Preferred: Tool Call Parsing**
+
+`DecisionOutput::parse_from_tool_calls()` extracts the decision from tool call results:
+
+```rust
+use ashford_core::llm::{DecisionOutput, DECISION_TOOL_NAME};
+
+// After getting the completion response
+let tool_calls = response.tool_calls;
+
+match DecisionOutput::parse_from_tool_calls(&tool_calls, DECISION_TOOL_NAME) {
+    Ok(decision) => {
+        // Use decision.decision.action, decision.decision.confidence, etc.
+    }
+    Err(DecisionParseError::NoToolCall) => {
+        // LLM didn't call the tool - may need to retry or use fallback
+    }
+    Err(DecisionParseError::WrongToolName { expected, actual }) => {
+        // LLM called a different tool
+    }
+    Err(DecisionParseError::Validation(e)) => {
+        // Handle validation failure - may want to require approval
+    }
+    Err(e) => {
+        // Handle other parse errors
+    }
+}
+```
+
+**Legacy: Text Response Parsing**
+
+`DecisionOutput::parse(response: &str)` extracts JSON from text responses (useful for testing or fallback):
+
+1. Extract JSON slice from the response (handles code fences and surrounding text)
+2. Deserialize into `DecisionOutput` using serde_json
+3. Run validation
+4. Return the validated decision or an error
+
+Parse errors are represented by `DecisionParseError`:
+
+```rust
+pub enum DecisionParseError {
+    NoJsonFound,           // No JSON object in response
+    MalformedJson,         // Unbalanced braces
+    Json(serde_json::Error), // Deserialization failed
+    Validation(DecisionValidationError), // Validation failed
+    NoToolCall,            // No tool call in response
+    WrongToolName { expected: String, actual: String }, // Wrong tool called
+}
+```
+
+#### Usage Example
+
+```rust
+use ashford_core::llm::{
+    build_decision_tool, DecisionOutput, DecisionParseError,
+    CompletionRequest, DECISION_TOOL_NAME,
+};
+
+// Build the request with the decision tool
+let tool = build_decision_tool();
+let request = CompletionRequest {
+    messages: prompt_builder.build(&message, &directions, &rules, None),
+    temperature: 0.1,
+    max_tokens: 4096,
+    json_mode: false,
+    tools: vec![tool],
+};
+
+// Call the LLM
+let response = llm_client.complete(request, context).await?;
+
+// Parse the tool call response
+match DecisionOutput::parse_from_tool_calls(&response.tool_calls, DECISION_TOOL_NAME) {
+    Ok(decision) => {
+        println!("Action: {:?}, Confidence: {}", decision.decision.action, decision.decision.confidence);
+    }
+    Err(e) => {
+        eprintln!("Failed to parse decision: {}", e);
+    }
+}
+```
 

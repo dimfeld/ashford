@@ -1,12 +1,19 @@
+pub mod decision;
 pub mod error;
 pub mod mock;
+pub mod prompt;
 pub mod repository;
 pub mod types;
 
+pub use decision::{
+    ActionType, ConsideredAlternative, DecisionDetails, DecisionOutput, DecisionParseError,
+    DecisionValidationError, Explanations, MessageRef, TelemetryPlaceholder, UndoHint,
+};
 pub use error::{LLMError, RateLimitInfo};
 pub use mock::MockLLMClient;
+pub use prompt::{build_decision_tool, PromptBuilder, PromptBuilderConfig, ThreadContext, DECISION_TOOL_NAME};
 pub use repository::{LlmCall, LlmCallContext, LlmCallError, LlmCallRepository, NewLlmCall};
-pub use types::{ChatMessage, ChatRole, CompletionRequest, CompletionResponse};
+pub use types::{ChatMessage, ChatRole, CompletionRequest, CompletionResponse, Tool, ToolCall, ToolCallResult};
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -95,7 +102,13 @@ impl GenaiLLMClient {
             .iter()
             .map(to_genai_message)
             .collect::<Vec<_>>();
-        ChatRequest::from_messages(messages)
+        let mut chat_request = ChatRequest::from_messages(messages);
+
+        if !request.tools.is_empty() {
+            chat_request = chat_request.with_tools(request.tools.clone());
+        }
+
+        chat_request
     }
 
     fn build_chat_options(&self, request: &CompletionRequest) -> ChatOptions {
@@ -173,6 +186,17 @@ impl LLMClient for GenaiLLMClient {
                 let (input_tokens, output_tokens) = usage_tokens(&response.usage);
                 let response_json = serde_json::to_value(&response).ok();
 
+                // Extract tool calls from the response
+                let tool_calls = response
+                    .tool_calls()
+                    .iter()
+                    .map(|tc| types::ToolCallResult {
+                        call_id: tc.call_id.clone(),
+                        fn_name: tc.fn_name.clone(),
+                        fn_arguments: tc.fn_arguments.clone(),
+                    })
+                    .collect();
+
                 self.log_call(
                     &context,
                     &provider_model,
@@ -191,6 +215,7 @@ impl LLMClient for GenaiLLMClient {
                     input_tokens,
                     output_tokens,
                     latency_ms,
+                    tool_calls,
                 })
             }
             Err(err) => {
@@ -409,6 +434,7 @@ mod tests {
             temperature: 0.1,
             max_tokens: 32,
             json_mode: false,
+            tools: vec![],
         };
 
         let built = client.build_chat_request(&request);
@@ -441,6 +467,7 @@ mod tests {
             temperature: 0.42,
             max_tokens: 128,
             json_mode: true,
+            tools: vec![],
         };
 
         let options = client.build_chat_options(&request);
@@ -662,6 +689,7 @@ mod tests {
             temperature: 0.5,
             max_tokens: 64,
             json_mode: true,
+            tools: vec![],
         };
         let context = LlmCallContext {
             feature: "classification".into(),
@@ -678,6 +706,7 @@ mod tests {
         assert_eq!(completion.input_tokens, 5);
         assert_eq!(completion.output_tokens, 7);
         assert_eq!(completion.model, expected_model);
+        assert!(completion.tool_calls.is_empty());
 
         let calls = client
             .repo
@@ -737,6 +766,7 @@ mod tests {
             temperature: 0.0,
             max_tokens: 16,
             json_mode: false,
+            tools: vec![],
         };
         let context = LlmCallContext::new("classification");
 

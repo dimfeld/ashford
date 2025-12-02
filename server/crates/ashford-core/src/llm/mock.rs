@@ -50,6 +50,7 @@ mod tests {
             input_tokens: 10,
             output_tokens: 2,
             latency_ms: 50,
+            tool_calls: vec![],
         };
         let response_two = CompletionResponse {
             content: "second".into(),
@@ -57,6 +58,7 @@ mod tests {
             input_tokens: 20,
             output_tokens: 4,
             latency_ms: 75,
+            tool_calls: vec![],
         };
 
         mock.enqueue_response(Ok(response_one.clone()));
@@ -68,6 +70,7 @@ mod tests {
             temperature: 0.0,
             max_tokens: 0,
             json_mode: false,
+            tools: vec![],
         };
         let context = LlmCallContext::new("test");
 
@@ -92,6 +95,7 @@ mod tests {
             temperature: 0.0,
             max_tokens: 0,
             json_mode: false,
+            tools: vec![],
         };
         let context = LlmCallContext::new("test");
 
