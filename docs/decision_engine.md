@@ -171,7 +171,7 @@ Example:
 TASK:
 Analyze this email and call the `record_decision` tool with your classification decision.
 
-Valid action types: apply_label, mark_read, mark_unread, archive, delete, ...
+Valid action types: apply_label, remove_label, mark_read, mark_unread, archive, trash, restore, delete, ...
 
 Requirements:
 - Confidence MUST be between 0.0 and 1.0 inclusive.
@@ -243,7 +243,7 @@ All action types are classified by danger level (`ActionDangerLevel` enum):
 
 | Level | Actions | Behavior |
 |-------|---------|----------|
-| **Safe** | ApplyLabel, MarkRead, MarkUnread, Archive, Move, None | Auto-execute |
+| **Safe** | ApplyLabel, RemoveLabel, MarkRead, MarkUnread, Archive, Move, Trash, Restore, None | Auto-execute |
 | **Reversible** | Star, Unstar, Snooze, AddNote, CreateTask | Auto-execute with undo hint |
 | **Dangerous** | Delete, Forward, AutoReply, Escalate | Always requires approval |
 
@@ -472,6 +472,7 @@ All supported action types are defined as a Rust enum with snake_case serializat
 #[serde(rename_all = "snake_case")]
 pub enum ActionType {
     ApplyLabel,
+    RemoveLabel,
     MarkRead,
     MarkUnread,
     Archive,
@@ -485,6 +486,8 @@ pub enum ActionType {
     Snooze,
     AddNote,
     Escalate,
+    Trash,
+    Restore,
     None,
 }
 ```

@@ -490,6 +490,79 @@ impl ActionRepository {
         )
         .await
     }
+
+    /// Mark an action as completed and store the undo hint atomically.
+    ///
+    /// This combines the status update with the undo_hint_json update in a single
+    /// database operation, ensuring consistency for undo functionality.
+    ///
+    /// # Arguments
+    /// * `org_id` - Organization ID
+    /// * `user_id` - User ID
+    /// * `id` - Action ID
+    /// * `undo_hint` - JSON value containing the pre-image state and inverse action info
+    ///
+    /// # Returns
+    /// The updated Action record
+    pub async fn mark_completed_with_undo_hint(
+        &self,
+        org_id: i64,
+        user_id: i64,
+        id: &str,
+        undo_hint: serde_json::Value,
+    ) -> Result<Action, ActionError> {
+        let current = self.get_by_id(org_id, user_id, id).await?;
+        if !is_valid_transition(&current.status, &ActionStatus::Completed) {
+            return Err(ActionError::InvalidStatusTransition {
+                from: current.status,
+                to: ActionStatus::Completed,
+            });
+        }
+
+        let now = now_rfc3339();
+        let executed_at_str = current
+            .executed_at
+            .map(to_rfc3339)
+            .unwrap_or_else(|| now.clone());
+        let undo_hint_json = serde_json::to_string(&undo_hint)?;
+
+        let conn = self.db.connection().await?;
+        let mut rows = conn
+            .query(
+                &format!(
+                    "UPDATE actions
+                     SET status = ?1,
+                         undo_hint_json = ?2,
+                         executed_at = COALESCE(?3, executed_at),
+                         updated_at = ?4
+                     WHERE id = ?5 AND status = ?6 AND org_id = ?7 AND user_id = ?8
+                     RETURNING {ACTION_COLUMNS}"
+                ),
+                params![
+                    ActionStatus::Completed.as_str(),
+                    undo_hint_json,
+                    executed_at_str,
+                    now,
+                    id,
+                    current.status.as_str(),
+                    org_id,
+                    user_id,
+                ],
+            )
+            .await?;
+
+        match rows.next().await? {
+            Some(row) => row_to_action(row),
+            None => match self.get_by_id(org_id, user_id, id).await {
+                Ok(latest) => Err(ActionError::InvalidStatusTransition {
+                    from: latest.status,
+                    to: ActionStatus::Completed,
+                }),
+                Err(err @ ActionError::NotFound(_)) => Err(err),
+                Err(err) => Err(err),
+            },
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -1198,6 +1271,98 @@ mod tests {
         assert_eq!(failed.status, ActionStatus::Failed);
         assert_eq!(failed.error_message.as_deref(), Some("boom"));
         assert!(failed.executed_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn action_mark_completed_with_undo_hint_stores_hint() {
+        let (db, _dir) = setup_db().await;
+        let account_id = seed_account(&db).await;
+        let thread_id = seed_thread(&db, &account_id, "t1").await;
+        let message_id = seed_message(&db, &account_id, &thread_id, "m1").await;
+        let decisions = DecisionRepository::new(db.clone());
+        let decision = decisions
+            .create(sample_new_decision(&account_id, &message_id))
+            .await
+            .expect("decision");
+        let repo = ActionRepository::new(db);
+
+        let created = repo
+            .create(sample_new_action(
+                &account_id,
+                &message_id,
+                Some(&decision.id),
+                ActionStatus::Queued,
+            ))
+            .await
+            .expect("create");
+
+        // Must be in Executing state to transition to Completed
+        repo.mark_executing(DEFAULT_ORG_ID, DEFAULT_USER_ID, &created.id)
+            .await
+            .expect("mark executing");
+
+        let undo_hint = serde_json::json!({
+            "pre_labels": ["INBOX", "UNREAD"],
+            "pre_unread": true,
+            "pre_starred": false,
+            "pre_in_inbox": true,
+            "pre_in_trash": false,
+            "action": "archive",
+            "inverse_action": "apply_label",
+            "inverse_parameters": {"label": "INBOX"}
+        });
+
+        let completed = repo
+            .mark_completed_with_undo_hint(
+                DEFAULT_ORG_ID,
+                DEFAULT_USER_ID,
+                &created.id,
+                undo_hint.clone(),
+            )
+            .await
+            .expect("complete with undo hint");
+
+        assert_eq!(completed.status, ActionStatus::Completed);
+        assert!(completed.executed_at.is_some());
+        assert_eq!(completed.undo_hint_json, undo_hint);
+    }
+
+    #[tokio::test]
+    async fn action_mark_completed_with_undo_hint_rejects_invalid_transition() {
+        let (db, _dir) = setup_db().await;
+        let account_id = seed_account(&db).await;
+        let thread_id = seed_thread(&db, &account_id, "t1").await;
+        let message_id = seed_message(&db, &account_id, &thread_id, "m1").await;
+        let decisions = DecisionRepository::new(db.clone());
+        let decision = decisions
+            .create(sample_new_decision(&account_id, &message_id))
+            .await
+            .expect("decision");
+        let repo = ActionRepository::new(db);
+
+        let created = repo
+            .create(sample_new_action(
+                &account_id,
+                &message_id,
+                Some(&decision.id),
+                ActionStatus::Queued,
+            ))
+            .await
+            .expect("create");
+
+        // Queued cannot directly go to Completed
+        let undo_hint = serde_json::json!({"test": "data"});
+        let result = repo
+            .mark_completed_with_undo_hint(DEFAULT_ORG_ID, DEFAULT_USER_ID, &created.id, undo_hint)
+            .await;
+
+        match result {
+            Err(ActionError::InvalidStatusTransition { from, to }) => {
+                assert_eq!(from, ActionStatus::Queued);
+                assert_eq!(to, ActionStatus::Completed);
+            }
+            other => panic!("expected InvalidStatusTransition, got {:?}", other),
+        }
     }
 
     #[tokio::test]

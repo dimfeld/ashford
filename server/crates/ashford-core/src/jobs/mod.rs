@@ -114,6 +114,12 @@ pub(crate) fn map_gmail_error(context: &str, err: GmailClientError) -> JobError 
         }
         GmailClientError::TokenStore(err) => JobError::Fatal(format!("{context}: {err}")),
         GmailClientError::Decode(err) => JobError::Fatal(format!("{context}: {err}")),
+        GmailClientError::InvalidParameter(err) => {
+            JobError::Fatal(format!("{context}: invalid parameter: {err}"))
+        }
+        GmailClientError::UnsupportedAction(action_type) => JobError::Fatal(format!(
+            "{context}: action type '{action_type}' not yet implemented"
+        )),
     }
 }
 

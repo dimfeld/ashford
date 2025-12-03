@@ -199,6 +199,20 @@ CREATE INDEX actions_message_idx
 CREATE INDEX actions_status_idx
   ON actions(status, created_at);
 
+**Repository Methods:**
+- `get_by_id(org_id, user_id, id)` - Fetch action by internal UUID
+- `create(action)` - Insert a new action record
+- `mark_executing(org_id, user_id, id)` - Transition to Executing status, set executed_at
+- `mark_completed(org_id, user_id, id)` - Transition to Completed status
+- `mark_completed_with_undo_hint(org_id, user_id, id, undo_hint)` - Atomically set Completed status and undo_hint_json
+- `mark_failed(org_id, user_id, id, error_message)` - Transition to Failed with error details
+
+**Status State Machine:**
+- `Queued` → `Executing`, `Canceled`, `Rejected`, `ApprovedPending`, `Failed`
+- `Executing` → `Completed`, `Failed`, `Canceled`
+- `ApprovedPending` → `Queued`, `Canceled`, `Rejected`
+- Terminal states (`Completed`, `Failed`, `Canceled`, `Rejected`) → no transitions
+
 
 ⸻
 

@@ -91,3 +91,20 @@ See the `labels` table in data_model.md for schema details.
 
     - Use Gmail search queries (e.g., newer_than:30d) or History at an older baseline.
 
+### **6.3 Gmail Write Operations**
+
+The `GmailClient` provides methods for mutating Gmail messages:
+
+**Label Modification**:
+- `modify_message(message_id, add_labels, remove_labels)` - Add/remove labels from a message
+- Used for: archive (remove INBOX), apply_label, remove_label, mark_read/unread (UNREAD label), star/unstar (STARRED label)
+
+**Trash Operations**:
+- `trash_message(message_id)` - Move message to trash (reversible)
+- `untrash_message(message_id)` - Restore message from trash
+
+**Permanent Deletion**:
+- `delete_message(message_id)` - Permanently delete a message (irreversible, use with caution)
+
+All write operations use the same authentication and token refresh mechanism as read operations. Errors are mapped to `GmailClientError` with appropriate retry behavior (see job_queue.md for error handling details).
+

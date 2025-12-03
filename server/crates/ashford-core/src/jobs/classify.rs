@@ -409,8 +409,17 @@ fn generate_undo_hint(
         ActionType::MarkUnread => (ActionType::MarkRead, json!({})),
         ActionType::Star => (ActionType::Unstar, json!({})),
         ActionType::Unstar => (ActionType::Star, json!({})),
-        ActionType::ApplyLabel => (ActionType::None, json!({"note": "remove applied label"})),
+        ActionType::ApplyLabel => (
+            ActionType::RemoveLabel,
+            json!({"note": "remove applied label"}),
+        ),
+        ActionType::RemoveLabel => (
+            ActionType::ApplyLabel,
+            json!({"note": "restore removed label"}),
+        ),
         ActionType::Move => (ActionType::Move, json!({"destination": "INBOX"})),
+        ActionType::Trash => (ActionType::Restore, json!({})),
+        ActionType::Restore => (ActionType::Trash, json!({})),
         ActionType::Forward => (ActionType::None, json!({"note": "cannot undo forward"})),
         ActionType::AutoReply => (ActionType::None, json!({"note": "cannot undo auto_reply"})),
         ActionType::CreateTask => (ActionType::None, json!({"note": "delete created task"})),

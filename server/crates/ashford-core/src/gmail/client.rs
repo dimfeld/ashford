@@ -13,7 +13,8 @@ use crate::gmail::{
         refresh_access_token_with_endpoint,
     },
     types::{
-        ListHistoryResponse, ListLabelsResponse, ListMessagesResponse, Message, Profile, Thread,
+        ListHistoryResponse, ListLabelsResponse, ListMessagesResponse, Message,
+        ModifyMessageRequest, Profile, Thread,
     },
 };
 
@@ -31,6 +32,10 @@ pub enum GmailClientError {
     Decode(#[from] serde_json::Error),
     #[error("unauthorized after refresh")]
     Unauthorized,
+    #[error("invalid parameter: {0}")]
+    InvalidParameter(String),
+    #[error("unsupported action type: {0}")]
+    UnsupportedAction(String),
 }
 
 pub struct GmailClient<S: TokenStore> {
@@ -78,8 +83,23 @@ impl<S: TokenStore> GmailClient<S> {
     }
 
     pub async fn get_message(&self, message_id: &str) -> Result<Message, GmailClientError> {
+        self.get_message_with_format(message_id, "full").await
+    }
+
+    /// Fetches a message using the lightweight "minimal" format, which returns only IDs
+    /// and label metadata. This avoids downloading full payloads when we only need labels.
+    pub async fn get_message_minimal(&self, message_id: &str) -> Result<Message, GmailClientError> {
+        self.get_message_with_format(message_id, "minimal").await
+    }
+
+    async fn get_message_with_format(
+        &self,
+        message_id: &str,
+        format: &str,
+    ) -> Result<Message, GmailClientError> {
         let url = format!("{}/{}/messages/{}", self.api_base, self.user_id, message_id);
-        self.send_json(|| self.http.get(&url).query(&[("format", "full")]))
+        let format = format.to_string();
+        self.send_json(move || self.http.get(&url).query(&[("format", format.clone())]))
             .await
     }
 
@@ -151,6 +171,81 @@ impl<S: TokenStore> GmailClient<S> {
         self.send_json(|| self.http.get(&url)).await
     }
 
+    /// Modifies the labels on a message.
+    ///
+    /// # Arguments
+    /// * `message_id` - The ID of the message to modify
+    /// * `add_labels` - Label IDs to add to the message (pass None or empty vec to add nothing)
+    /// * `remove_labels` - Label IDs to remove from the message (pass None or empty vec to remove nothing)
+    ///
+    /// # Returns
+    /// The updated message with its new label state.
+    pub async fn modify_message(
+        &self,
+        message_id: &str,
+        add_labels: Option<Vec<String>>,
+        remove_labels: Option<Vec<String>>,
+    ) -> Result<Message, GmailClientError> {
+        let url = format!(
+            "{}/{}/messages/{}/modify",
+            self.api_base, self.user_id, message_id
+        );
+        let request = ModifyMessageRequest {
+            add_label_ids: add_labels,
+            remove_label_ids: remove_labels,
+        };
+        self.send_json(|| self.http.post(&url).json(&request)).await
+    }
+
+    /// Moves a message to the trash.
+    ///
+    /// The message will remain in trash for 30 days before being automatically deleted.
+    /// Use `untrash_message` to restore a trashed message.
+    ///
+    /// # Arguments
+    /// * `message_id` - The ID of the message to trash
+    ///
+    /// # Returns
+    /// The updated message now in the trash.
+    pub async fn trash_message(&self, message_id: &str) -> Result<Message, GmailClientError> {
+        let url = format!(
+            "{}/{}/messages/{}/trash",
+            self.api_base, self.user_id, message_id
+        );
+        self.send_json(|| self.http.post(&url)).await
+    }
+
+    /// Removes a message from the trash and restores it to the mailbox.
+    ///
+    /// # Arguments
+    /// * `message_id` - The ID of the message to restore from trash
+    ///
+    /// # Returns
+    /// The restored message.
+    pub async fn untrash_message(&self, message_id: &str) -> Result<Message, GmailClientError> {
+        let url = format!(
+            "{}/{}/messages/{}/untrash",
+            self.api_base, self.user_id, message_id
+        );
+        self.send_json(|| self.http.post(&url)).await
+    }
+
+    /// Permanently and immediately deletes a message.
+    ///
+    /// **WARNING**: This operation is irreversible. The message cannot be recovered
+    /// after deletion. This bypasses the trash. Consider using `trash_message` instead
+    /// for a safer, reversible option.
+    ///
+    /// # Arguments
+    /// * `message_id` - The ID of the message to permanently delete
+    ///
+    /// # Returns
+    /// `Ok(())` if the message was successfully deleted. Gmail returns 204 No Content.
+    pub async fn delete_message(&self, message_id: &str) -> Result<(), GmailClientError> {
+        let url = format!("{}/{}/messages/{}", self.api_base, self.user_id, message_id);
+        self.send_empty_response(|| self.http.delete(&url)).await
+    }
+
     async fn send_json<T, B>(&self, build: B) -> Result<T, GmailClientError>
     where
         T: DeserializeOwned,
@@ -159,6 +254,15 @@ impl<S: TokenStore> GmailClient<S> {
         let response = self.perform_authenticated(build).await?;
         let body = response.text().await?;
         serde_json::from_str(&body).map_err(GmailClientError::Decode)
+    }
+
+    /// Sends an authenticated request that expects no response body (e.g., 204 No Content).
+    async fn send_empty_response<B>(&self, build: B) -> Result<(), GmailClientError>
+    where
+        B: Fn() -> reqwest::RequestBuilder + Send + Sync,
+    {
+        let _response = self.perform_authenticated(build).await?;
+        Ok(())
     }
 
     async fn perform_authenticated<B>(
@@ -234,7 +338,7 @@ mod tests {
     use chrono::Duration;
     use serde_json::json;
     use tokio::sync::Mutex as TokioMutex;
-    use wiremock::matchers::{header, method, path, query_param};
+    use wiremock::matchers::{body_json, header, method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[derive(Default)]
@@ -503,6 +607,42 @@ mod tests {
 
         let saved = store.saved.lock().await;
         assert!(saved.is_empty(), "tokens should not be refreshed");
+    }
+
+    #[tokio::test]
+    async fn get_message_minimal_requests_minimal_format() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/gmail/v1/users/me/messages/abc"))
+            .and(query_param("format", "minimal"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "abc",
+                "labelIds": ["INBOX"],
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let tokens = OAuthTokens {
+            access_token: "token".into(),
+            refresh_token: "refresh".into(),
+            expires_at: Utc::now() + Duration::hours(2),
+        };
+        let store = Arc::new(RecordingStore::default());
+        let client = make_client(&server, tokens, store.clone());
+
+        let message = client
+            .get_message_minimal("abc")
+            .await
+            .expect("message loads");
+
+        assert_eq!(message.id, "abc");
+        let saved = store.saved.lock().await;
+        assert!(
+            saved.is_empty(),
+            "tokens should not be refreshed for minimal fetch"
+        );
     }
 
     #[tokio::test]
@@ -994,5 +1134,704 @@ mod tests {
         let color = label.color.as_ref().expect("should have color");
         assert_eq!(color.background_color.as_deref(), Some("#ff0000"));
         assert!(color.text_color.is_none());
+    }
+
+    #[tokio::test]
+    async fn modify_message_adds_and_removes_labels() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/gmail/v1/users/me/messages/msg123/modify"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "msg123",
+                "threadId": "thread456",
+                "labelIds": ["INBOX", "IMPORTANT", "Label_custom"],
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let tokens = OAuthTokens {
+            access_token: "token".into(),
+            refresh_token: "refresh".into(),
+            expires_at: Utc::now() + Duration::hours(1),
+        };
+        let store = Arc::new(RecordingStore::default());
+        let client = make_client(&server, tokens, store);
+
+        let message = client
+            .modify_message(
+                "msg123",
+                Some(vec!["IMPORTANT".into(), "Label_custom".into()]),
+                Some(vec!["UNREAD".into()]),
+            )
+            .await
+            .expect("modify_message succeeds");
+
+        assert_eq!(message.id, "msg123");
+        assert_eq!(message.thread_id.as_deref(), Some("thread456"));
+        assert!(message.label_ids.contains(&"IMPORTANT".to_string()));
+        assert!(message.label_ids.contains(&"Label_custom".to_string()));
+    }
+
+    #[tokio::test]
+    async fn modify_message_with_only_add_labels() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/gmail/v1/users/me/messages/msg123/modify"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "msg123",
+                "labelIds": ["INBOX", "STARRED"],
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let tokens = OAuthTokens {
+            access_token: "token".into(),
+            refresh_token: "refresh".into(),
+            expires_at: Utc::now() + Duration::hours(1),
+        };
+        let store = Arc::new(RecordingStore::default());
+        let client = make_client(&server, tokens, store);
+
+        let message = client
+            .modify_message("msg123", Some(vec!["STARRED".into()]), None)
+            .await
+            .expect("modify_message succeeds");
+
+        assert_eq!(message.id, "msg123");
+        assert!(message.label_ids.contains(&"STARRED".to_string()));
+    }
+
+    #[tokio::test]
+    async fn modify_message_with_only_remove_labels() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/gmail/v1/users/me/messages/msg123/modify"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "msg123",
+                "labelIds": [],
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let tokens = OAuthTokens {
+            access_token: "token".into(),
+            refresh_token: "refresh".into(),
+            expires_at: Utc::now() + Duration::hours(1),
+        };
+        let store = Arc::new(RecordingStore::default());
+        let client = make_client(&server, tokens, store);
+
+        let message = client
+            .modify_message("msg123", None, Some(vec!["INBOX".into()]))
+            .await
+            .expect("modify_message succeeds");
+
+        assert_eq!(message.id, "msg123");
+        assert!(message.label_ids.is_empty());
+    }
+
+    #[tokio::test]
+    async fn modify_message_handles_not_found() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/gmail/v1/users/me/messages/missing/modify"))
+            .respond_with(ResponseTemplate::new(404))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let tokens = OAuthTokens {
+            access_token: "token".into(),
+            refresh_token: "refresh".into(),
+            expires_at: Utc::now() + Duration::hours(1),
+        };
+        let store = Arc::new(RecordingStore::default());
+        let client = make_client(&server, tokens, store);
+
+        let err = client
+            .modify_message("missing", Some(vec!["STARRED".into()]), None)
+            .await
+            .expect_err("should return 404 error");
+
+        match err {
+            GmailClientError::Http(e) => {
+                assert_eq!(e.status(), Some(StatusCode::NOT_FOUND));
+            }
+            other => panic!("unexpected error: {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn trash_message_moves_to_trash() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/gmail/v1/users/me/messages/msg123/trash"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "msg123",
+                "threadId": "thread456",
+                "labelIds": ["TRASH"],
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let tokens = OAuthTokens {
+            access_token: "token".into(),
+            refresh_token: "refresh".into(),
+            expires_at: Utc::now() + Duration::hours(1),
+        };
+        let store = Arc::new(RecordingStore::default());
+        let client = make_client(&server, tokens, store);
+
+        let message = client
+            .trash_message("msg123")
+            .await
+            .expect("trash_message succeeds");
+
+        assert_eq!(message.id, "msg123");
+        assert!(message.label_ids.contains(&"TRASH".to_string()));
+    }
+
+    #[tokio::test]
+    async fn trash_message_handles_not_found() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/gmail/v1/users/me/messages/missing/trash"))
+            .respond_with(ResponseTemplate::new(404))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let tokens = OAuthTokens {
+            access_token: "token".into(),
+            refresh_token: "refresh".into(),
+            expires_at: Utc::now() + Duration::hours(1),
+        };
+        let store = Arc::new(RecordingStore::default());
+        let client = make_client(&server, tokens, store);
+
+        let err = client
+            .trash_message("missing")
+            .await
+            .expect_err("should return 404 error");
+
+        match err {
+            GmailClientError::Http(e) => {
+                assert_eq!(e.status(), Some(StatusCode::NOT_FOUND));
+            }
+            other => panic!("unexpected error: {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn untrash_message_restores_from_trash() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/gmail/v1/users/me/messages/msg123/untrash"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "msg123",
+                "threadId": "thread456",
+                "labelIds": ["INBOX"],
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let tokens = OAuthTokens {
+            access_token: "token".into(),
+            refresh_token: "refresh".into(),
+            expires_at: Utc::now() + Duration::hours(1),
+        };
+        let store = Arc::new(RecordingStore::default());
+        let client = make_client(&server, tokens, store);
+
+        let message = client
+            .untrash_message("msg123")
+            .await
+            .expect("untrash_message succeeds");
+
+        assert_eq!(message.id, "msg123");
+        assert!(message.label_ids.contains(&"INBOX".to_string()));
+        assert!(!message.label_ids.contains(&"TRASH".to_string()));
+    }
+
+    #[tokio::test]
+    async fn untrash_message_handles_not_found() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/gmail/v1/users/me/messages/missing/untrash"))
+            .respond_with(ResponseTemplate::new(404))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let tokens = OAuthTokens {
+            access_token: "token".into(),
+            refresh_token: "refresh".into(),
+            expires_at: Utc::now() + Duration::hours(1),
+        };
+        let store = Arc::new(RecordingStore::default());
+        let client = make_client(&server, tokens, store);
+
+        let err = client
+            .untrash_message("missing")
+            .await
+            .expect_err("should return 404 error");
+
+        match err {
+            GmailClientError::Http(e) => {
+                assert_eq!(e.status(), Some(StatusCode::NOT_FOUND));
+            }
+            other => panic!("unexpected error: {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn delete_message_permanently_deletes() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("DELETE"))
+            .and(path("/gmail/v1/users/me/messages/msg123"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let tokens = OAuthTokens {
+            access_token: "token".into(),
+            refresh_token: "refresh".into(),
+            expires_at: Utc::now() + Duration::hours(1),
+        };
+        let store = Arc::new(RecordingStore::default());
+        let client = make_client(&server, tokens, store);
+
+        client
+            .delete_message("msg123")
+            .await
+            .expect("delete_message succeeds");
+    }
+
+    #[tokio::test]
+    async fn delete_message_handles_not_found() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("DELETE"))
+            .and(path("/gmail/v1/users/me/messages/missing"))
+            .respond_with(ResponseTemplate::new(404))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let tokens = OAuthTokens {
+            access_token: "token".into(),
+            refresh_token: "refresh".into(),
+            expires_at: Utc::now() + Duration::hours(1),
+        };
+        let store = Arc::new(RecordingStore::default());
+        let client = make_client(&server, tokens, store);
+
+        let err = client
+            .delete_message("missing")
+            .await
+            .expect_err("should return 404 error");
+
+        match err {
+            GmailClientError::Http(e) => {
+                assert_eq!(e.status(), Some(StatusCode::NOT_FOUND));
+            }
+            other => panic!("unexpected error: {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn delete_message_handles_rate_limit() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("DELETE"))
+            .and(path("/gmail/v1/users/me/messages/msg123"))
+            .respond_with(ResponseTemplate::new(429))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let tokens = OAuthTokens {
+            access_token: "token".into(),
+            refresh_token: "refresh".into(),
+            expires_at: Utc::now() + Duration::hours(1),
+        };
+        let store = Arc::new(RecordingStore::default());
+        let client = make_client(&server, tokens, store);
+
+        let err = client
+            .delete_message("msg123")
+            .await
+            .expect_err("should return 429 error");
+
+        match err {
+            GmailClientError::Http(e) => {
+                assert_eq!(e.status(), Some(StatusCode::TOO_MANY_REQUESTS));
+            }
+            other => panic!("unexpected error: {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn modify_message_retries_after_unauthorized() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "access_token": "fresh_token",
+                "refresh_token": "refresh_new",
+                "expires_in": 3600,
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/gmail/v1/users/me/messages/msg123/modify"))
+            .and(header("authorization", "Bearer old_token"))
+            .respond_with(ResponseTemplate::new(401))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/gmail/v1/users/me/messages/msg123/modify"))
+            .and(header("authorization", "Bearer fresh_token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "msg123",
+                "labelIds": ["STARRED"],
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let tokens = OAuthTokens {
+            access_token: "old_token".into(),
+            refresh_token: "refresh_old".into(),
+            expires_at: Utc::now() + Duration::minutes(10),
+        };
+        let store = Arc::new(RecordingStore::default());
+        let client = make_client(&server, tokens, store.clone());
+
+        let message = client
+            .modify_message("msg123", Some(vec!["STARRED".into()]), None)
+            .await
+            .expect("modify_message should succeed after retry");
+
+        assert_eq!(message.id, "msg123");
+
+        let saved = store.saved.lock().await;
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].access_token, "fresh_token");
+    }
+
+    #[tokio::test]
+    async fn modify_message_sends_correct_request_body() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/gmail/v1/users/me/messages/msg123/modify"))
+            .and(body_json(json!({
+                "addLabelIds": ["STARRED", "IMPORTANT"],
+                "removeLabelIds": ["UNREAD"]
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "msg123",
+                "labelIds": ["STARRED", "IMPORTANT"],
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let tokens = OAuthTokens {
+            access_token: "token".into(),
+            refresh_token: "refresh".into(),
+            expires_at: Utc::now() + Duration::hours(1),
+        };
+        let store = Arc::new(RecordingStore::default());
+        let client = make_client(&server, tokens, store);
+
+        let message = client
+            .modify_message(
+                "msg123",
+                Some(vec!["STARRED".into(), "IMPORTANT".into()]),
+                Some(vec!["UNREAD".into()]),
+            )
+            .await
+            .expect("modify_message succeeds");
+
+        assert_eq!(message.id, "msg123");
+    }
+
+    #[tokio::test]
+    async fn modify_message_omits_none_fields_in_request_body() {
+        let server = MockServer::start().await;
+
+        // When only add_labels is provided, remove_labels should be omitted from the request
+        Mock::given(method("POST"))
+            .and(path("/gmail/v1/users/me/messages/msg123/modify"))
+            .and(body_json(json!({
+                "addLabelIds": ["STARRED"]
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "msg123",
+                "labelIds": ["STARRED"],
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let tokens = OAuthTokens {
+            access_token: "token".into(),
+            refresh_token: "refresh".into(),
+            expires_at: Utc::now() + Duration::hours(1),
+        };
+        let store = Arc::new(RecordingStore::default());
+        let client = make_client(&server, tokens, store);
+
+        let message = client
+            .modify_message("msg123", Some(vec!["STARRED".into()]), None)
+            .await
+            .expect("modify_message succeeds");
+
+        assert_eq!(message.id, "msg123");
+    }
+
+    #[tokio::test]
+    async fn trash_message_handles_rate_limit() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/gmail/v1/users/me/messages/msg123/trash"))
+            .respond_with(ResponseTemplate::new(429))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let tokens = OAuthTokens {
+            access_token: "token".into(),
+            refresh_token: "refresh".into(),
+            expires_at: Utc::now() + Duration::hours(1),
+        };
+        let store = Arc::new(RecordingStore::default());
+        let client = make_client(&server, tokens, store);
+
+        let err = client
+            .trash_message("msg123")
+            .await
+            .expect_err("should return 429 error");
+
+        match err {
+            GmailClientError::Http(e) => {
+                assert_eq!(e.status(), Some(StatusCode::TOO_MANY_REQUESTS));
+            }
+            other => panic!("unexpected error: {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn trash_message_retries_after_unauthorized() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "access_token": "fresh_token",
+                "refresh_token": "refresh_new",
+                "expires_in": 3600,
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/gmail/v1/users/me/messages/msg123/trash"))
+            .and(header("authorization", "Bearer old_token"))
+            .respond_with(ResponseTemplate::new(401))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/gmail/v1/users/me/messages/msg123/trash"))
+            .and(header("authorization", "Bearer fresh_token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "msg123",
+                "labelIds": ["TRASH"],
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let tokens = OAuthTokens {
+            access_token: "old_token".into(),
+            refresh_token: "refresh_old".into(),
+            expires_at: Utc::now() + Duration::minutes(10),
+        };
+        let store = Arc::new(RecordingStore::default());
+        let client = make_client(&server, tokens, store.clone());
+
+        let message = client
+            .trash_message("msg123")
+            .await
+            .expect("trash_message should succeed after retry");
+
+        assert_eq!(message.id, "msg123");
+        assert!(message.label_ids.contains(&"TRASH".to_string()));
+
+        let saved = store.saved.lock().await;
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].access_token, "fresh_token");
+    }
+
+    #[tokio::test]
+    async fn untrash_message_handles_rate_limit() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/gmail/v1/users/me/messages/msg123/untrash"))
+            .respond_with(ResponseTemplate::new(429))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let tokens = OAuthTokens {
+            access_token: "token".into(),
+            refresh_token: "refresh".into(),
+            expires_at: Utc::now() + Duration::hours(1),
+        };
+        let store = Arc::new(RecordingStore::default());
+        let client = make_client(&server, tokens, store);
+
+        let err = client
+            .untrash_message("msg123")
+            .await
+            .expect_err("should return 429 error");
+
+        match err {
+            GmailClientError::Http(e) => {
+                assert_eq!(e.status(), Some(StatusCode::TOO_MANY_REQUESTS));
+            }
+            other => panic!("unexpected error: {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn untrash_message_retries_after_unauthorized() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "access_token": "fresh_token",
+                "refresh_token": "refresh_new",
+                "expires_in": 3600,
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/gmail/v1/users/me/messages/msg123/untrash"))
+            .and(header("authorization", "Bearer old_token"))
+            .respond_with(ResponseTemplate::new(401))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/gmail/v1/users/me/messages/msg123/untrash"))
+            .and(header("authorization", "Bearer fresh_token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "msg123",
+                "labelIds": ["INBOX"],
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let tokens = OAuthTokens {
+            access_token: "old_token".into(),
+            refresh_token: "refresh_old".into(),
+            expires_at: Utc::now() + Duration::minutes(10),
+        };
+        let store = Arc::new(RecordingStore::default());
+        let client = make_client(&server, tokens, store.clone());
+
+        let message = client
+            .untrash_message("msg123")
+            .await
+            .expect("untrash_message should succeed after retry");
+
+        assert_eq!(message.id, "msg123");
+        assert!(message.label_ids.contains(&"INBOX".to_string()));
+
+        let saved = store.saved.lock().await;
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].access_token, "fresh_token");
+    }
+
+    #[tokio::test]
+    async fn delete_message_retries_after_unauthorized() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "access_token": "fresh_token",
+                "refresh_token": "refresh_new",
+                "expires_in": 3600,
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        Mock::given(method("DELETE"))
+            .and(path("/gmail/v1/users/me/messages/msg123"))
+            .and(header("authorization", "Bearer old_token"))
+            .respond_with(ResponseTemplate::new(401))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        Mock::given(method("DELETE"))
+            .and(path("/gmail/v1/users/me/messages/msg123"))
+            .and(header("authorization", "Bearer fresh_token"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let tokens = OAuthTokens {
+            access_token: "old_token".into(),
+            refresh_token: "refresh_old".into(),
+            expires_at: Utc::now() + Duration::minutes(10),
+        };
+        let store = Arc::new(RecordingStore::default());
+        let client = make_client(&server, tokens, store.clone());
+
+        client
+            .delete_message("msg123")
+            .await
+            .expect("delete_message should succeed after retry");
+
+        let saved = store.saved.lock().await;
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].access_token, "fresh_token");
     }
 }

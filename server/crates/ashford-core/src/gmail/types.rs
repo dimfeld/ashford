@@ -153,3 +153,104 @@ pub struct ListLabelsResponse {
     #[serde(default)]
     pub labels: Vec<Label>,
 }
+
+/// Request body for the Gmail Users.messages.modify endpoint.
+/// Used to add or remove labels from a message.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ModifyMessageRequest {
+    /// Label IDs to add to the message.
+    #[serde(rename = "addLabelIds", skip_serializing_if = "Option::is_none")]
+    pub add_label_ids: Option<Vec<String>>,
+    /// Label IDs to remove from the message.
+    #[serde(rename = "removeLabelIds", skip_serializing_if = "Option::is_none")]
+    pub remove_label_ids: Option<Vec<String>>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn modify_message_request_serializes_with_both_fields() {
+        let request = ModifyMessageRequest {
+            add_label_ids: Some(vec!["STARRED".into(), "Label_123".into()]),
+            remove_label_ids: Some(vec!["UNREAD".into()]),
+        };
+        let json = serde_json::to_value(&request).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "addLabelIds": ["STARRED", "Label_123"],
+                "removeLabelIds": ["UNREAD"]
+            })
+        );
+    }
+
+    #[test]
+    fn modify_message_request_omits_none_add_labels() {
+        let request = ModifyMessageRequest {
+            add_label_ids: None,
+            remove_label_ids: Some(vec!["INBOX".into()]),
+        };
+        let json = serde_json::to_value(&request).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "removeLabelIds": ["INBOX"]
+            })
+        );
+        // Verify the field is not present at all
+        assert!(!json.as_object().unwrap().contains_key("addLabelIds"));
+    }
+
+    #[test]
+    fn modify_message_request_omits_none_remove_labels() {
+        let request = ModifyMessageRequest {
+            add_label_ids: Some(vec!["STARRED".into()]),
+            remove_label_ids: None,
+        };
+        let json = serde_json::to_value(&request).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "addLabelIds": ["STARRED"]
+            })
+        );
+        // Verify the field is not present at all
+        assert!(!json.as_object().unwrap().contains_key("removeLabelIds"));
+    }
+
+    #[test]
+    fn modify_message_request_both_none_serializes_to_empty_object() {
+        let request = ModifyMessageRequest {
+            add_label_ids: None,
+            remove_label_ids: None,
+        };
+        let json = serde_json::to_value(&request).unwrap();
+        assert_eq!(json, serde_json::json!({}));
+    }
+
+    #[test]
+    fn modify_message_request_deserializes_correctly() {
+        let json = serde_json::json!({
+            "addLabelIds": ["STARRED"],
+            "removeLabelIds": ["UNREAD", "INBOX"]
+        });
+        let request: ModifyMessageRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(request.add_label_ids, Some(vec!["STARRED".to_string()]));
+        assert_eq!(
+            request.remove_label_ids,
+            Some(vec!["UNREAD".to_string(), "INBOX".to_string()])
+        );
+    }
+
+    #[test]
+    fn modify_message_request_deserializes_with_missing_fields() {
+        let json = serde_json::json!({
+            "addLabelIds": ["Label_1"]
+        });
+        let request: ModifyMessageRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(request.add_label_ids, Some(vec!["Label_1".to_string()]));
+        assert_eq!(request.remove_label_ids, None);
+    }
+}

@@ -4,7 +4,7 @@
 
     - ingest.gmail - Fetch and persist a Gmail message
     - classify - Evaluate rules and LLM to determine action
-    - action.gmail - Execute Gmail actions (archive, label, etc.)
+    - action.gmail - Execute Gmail actions (archive, apply_label, remove_label, mark_read, mark_unread, star, unstar, trash, restore, delete)
     - approval.notify - Request approval via Discord
     - undo - Reverse a previous action
     - outbound.send - Send auto_reply/forward emails
@@ -102,7 +102,15 @@ Job handlers return `Result<(), JobError>` where `JobError` has two variants:
 - **Retryable**: Temporary failure, will be retried with backoff
 
 Error mapping utilities convert domain errors to appropriate `JobError` variants:
-- `map_gmail_error(context, err)` - Maps `GmailClientError` to `JobError`
+- `map_gmail_error(context, err)` - Maps `GmailClientError` to `JobError`:
+  - `Http` with 404 → Fatal (message not found)
+  - `Http` with 429/403 → Retryable (rate limiting)
+  - `Http` with 5xx → Retryable (server error)
+  - `Unauthorized` → Retryable (triggers token refresh)
+  - `OAuth` → Retryable (token refresh failure)
+  - `TokenStore`, `Decode` → Fatal (configuration error)
+  - `InvalidParameter` → Fatal (missing/empty action parameter)
+  - `UnsupportedAction` → Fatal (action type not yet implemented)
 - `map_llm_error(context, err)` - Maps `LLMError` to `JobError`
 - `map_account_error(context, err)` - Maps `AccountError` to `JobError`
 - `map_executor_error(context, err)` - Maps `ExecutorError` (rules engine) to `JobError`:
@@ -176,4 +184,56 @@ The labels sync job synchronizes Gmail labels to the local database and handles 
 - Can be triggered manually/on-demand
 
 The labels sync job ensures rules remain valid by soft-disabling rules that reference deleted labels rather than deleting them, allowing users to review and fix affected rules.
+
+### **5.7 Action Gmail Job**
+
+The action.gmail job executes Gmail mutations based on action records created by the classify job.
+
+**Payload**:
+```json
+{
+  "account_id": "uuid",
+  "action_id": "uuid"
+}
+```
+
+**Flow**:
+1. Parse payload and load action from database
+2. Validate action belongs to specified account
+3. Mark action as `Executing`
+4. Capture pre-image (current message labels/state) for undo hints
+5. Execute Gmail API mutation based on `action_type`
+6. On success: populate `undo_hint_json` and mark `Completed`
+7. On failure: mark `Failed` with error message
+
+**Supported Actions**:
+
+| Action Type | Gmail API Call | Description |
+|-------------|----------------|-------------|
+| `archive` | `modify_message` (remove INBOX) | Remove from inbox |
+| `apply_label` | `modify_message` (add label) | Add a label |
+| `remove_label` | `modify_message` (remove label) | Remove a label |
+| `mark_read` | `modify_message` (remove UNREAD) | Mark as read |
+| `mark_unread` | `modify_message` (add UNREAD) | Mark as unread |
+| `star` | `modify_message` (add STARRED) | Star message |
+| `unstar` | `modify_message` (remove STARRED) | Unstar message |
+| `trash` | `trash_message` | Move to trash |
+| `restore` | `untrash_message` | Restore from trash |
+| `delete` | `delete_message` | Permanently delete (irreversible) |
+
+**Parameter Validation**:
+- `apply_label` and `remove_label` require a non-empty `label` field in `parameters_json`
+- Missing or empty label parameters result in `InvalidParameter` error (fatal, no retry)
+
+**Undo Hints**:
+Each action captures pre-mutation state and stores the inverse operation in `undo_hint_json`. For example, archiving captures the current labels so the message can be restored to INBOX. The `delete` action is irreversible and stores a marker indicating it cannot be undone.
+
+**Error Handling**:
+- 404 Not Found → Fatal error (message deleted externally)
+- 429 Too Many Requests → Retryable with backoff
+- 401 Unauthorized → Retryable (triggers token refresh)
+- 5xx Server Error → Retryable with backoff
+- Invalid parameters → Fatal error (misconfigured action)
+
+**Idempotency key**: `action.gmail:{account_id}:{action_id}`
 

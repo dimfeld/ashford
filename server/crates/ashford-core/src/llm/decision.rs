@@ -12,10 +12,13 @@ use crate::decisions::policy::ActionDangerLevel;
 #[serde(rename_all = "snake_case")]
 pub enum ActionType {
     ApplyLabel,
+    RemoveLabel,
     MarkRead,
     MarkUnread,
     Archive,
     Delete,
+    Trash,
+    Restore,
     Move,
     Star,
     Unstar,
@@ -32,10 +35,13 @@ impl ActionType {
     pub fn as_str(&self) -> &'static str {
         match self {
             ActionType::ApplyLabel => "apply_label",
+            ActionType::RemoveLabel => "remove_label",
             ActionType::MarkRead => "mark_read",
             ActionType::MarkUnread => "mark_unread",
             ActionType::Archive => "archive",
             ActionType::Delete => "delete",
+            ActionType::Trash => "trash",
+            ActionType::Restore => "restore",
             ActionType::Move => "move",
             ActionType::Star => "star",
             ActionType::Unstar => "unstar",
@@ -51,16 +57,19 @@ impl ActionType {
 
     /// Returns the danger level classification for this action type.
     ///
-    /// - Safe: ApplyLabel, MarkRead, MarkUnread, Archive, Move, None
+    /// - Safe: ApplyLabel, RemoveLabel, MarkRead, MarkUnread, Archive, Move, Trash, Restore, None
     /// - Reversible: Star, Unstar, Snooze, AddNote, CreateTask
     /// - Dangerous: Delete, Forward, AutoReply, Escalate
     pub fn danger_level(&self) -> ActionDangerLevel {
         match self {
             // Safe actions - unlikely to cause harm
             ActionType::ApplyLabel
+            | ActionType::RemoveLabel
             | ActionType::MarkRead
             | ActionType::MarkUnread
             | ActionType::Archive
+            | ActionType::Trash
+            | ActionType::Restore
             | ActionType::Move
             | ActionType::None => ActionDangerLevel::Safe,
 
@@ -86,10 +95,13 @@ impl FromStr for ActionType {
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value {
             "apply_label" => Ok(Self::ApplyLabel),
+            "remove_label" => Ok(Self::RemoveLabel),
             "mark_read" => Ok(Self::MarkRead),
             "mark_unread" => Ok(Self::MarkUnread),
             "archive" => Ok(Self::Archive),
             "delete" => Ok(Self::Delete),
+            "trash" => Ok(Self::Trash),
+            "restore" => Ok(Self::Restore),
             "move" => Ok(Self::Move),
             "star" => Ok(Self::Star),
             "unstar" => Ok(Self::Unstar),
@@ -392,10 +404,13 @@ mod tests {
     fn action_type_round_trips() {
         for action in [
             ActionType::ApplyLabel,
+            ActionType::RemoveLabel,
             ActionType::MarkRead,
             ActionType::MarkUnread,
             ActionType::Archive,
             ActionType::Delete,
+            ActionType::Trash,
+            ActionType::Restore,
             ActionType::Move,
             ActionType::Star,
             ActionType::Unstar,
@@ -635,9 +650,12 @@ mod tests {
         // Safe actions
         for action in [
             ActionType::ApplyLabel,
+            ActionType::RemoveLabel,
             ActionType::MarkRead,
             ActionType::MarkUnread,
             ActionType::Archive,
+            ActionType::Trash,
+            ActionType::Restore,
             ActionType::Move,
             ActionType::None,
         ] {
@@ -687,10 +705,13 @@ mod tests {
         // This test will fail to compile if a new variant is added without updating danger_level()
         let all_actions = [
             ActionType::ApplyLabel,
+            ActionType::RemoveLabel,
             ActionType::MarkRead,
             ActionType::MarkUnread,
             ActionType::Archive,
             ActionType::Delete,
+            ActionType::Trash,
+            ActionType::Restore,
             ActionType::Move,
             ActionType::Star,
             ActionType::Unstar,
@@ -703,8 +724,8 @@ mod tests {
             ActionType::None,
         ];
 
-        // All 15 action types should have a danger level
-        assert_eq!(all_actions.len(), 15);
+        // All 18 action types should have a danger level
+        assert_eq!(all_actions.len(), 18);
         for action in all_actions {
             // This should not panic - just confirm we get a valid danger level
             let _ = action.danger_level();
