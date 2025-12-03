@@ -15,7 +15,11 @@ dependencies:
   - 16
   - 17
 parent: 4
-references: {}
+references:
+  "4": 5cf4cc37-3eb8-4f89-adae-421a751d13a1
+  "14": 4faa40e3-cbc5-4d8c-a596-225ab64a50d9
+  "16": b8c142c5-3335-4b87-9a94-28dbcc96af99
+  "17": 85737737-8826-483b-9a82-87e7c0098c90
 issue: []
 pullRequest: []
 docs:
@@ -407,9 +411,6 @@ tasks:
       For tests that don't need real LLM functionality, use
       `Arc::new(MockLLMClient::new())` and `PolicyConfig::default()`. Add helper
       function if needed to reduce duplication.
-    files: []
-    docs: []
-    steps: []
 changedFiles:
   - docs/configuration.md
   - docs/data_model.md

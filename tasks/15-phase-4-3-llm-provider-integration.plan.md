@@ -13,7 +13,9 @@ temp: false
 dependencies:
   - 13
 parent: 4
-references: {}
+references:
+  "4": 5cf4cc37-3eb8-4f89-adae-421a751d13a1
+  "13": 38766c9f-5711-40f8-b264-292a865ef49e
 issue: []
 pullRequest: []
 docs:
@@ -165,9 +167,6 @@ tasks:
       response), input_tokens (INTEGER), output_tokens (INTEGER), latency_ms
       (INTEGER), error (TEXT nullable), trace_id (TEXT nullable), created_at
       (TEXT). Add indices on (org_id, created_at) and (feature, created_at)."
-    files: []
-    docs: []
-    steps: []
   - title: Define LlmCall types and repository
     done: true
     description: "Create llm/repository.rs with: LlmCallContext struct (feature,
@@ -175,9 +174,6 @@ tasks:
       struct for inserts, LlmCall struct for reads, LlmCallRepository with
       create() and list() methods. Follow existing repository patterns from
       accounts.rs. Add re-exports to lib.rs."
-    files: []
-    docs: []
-    steps: []
 changedFiles:
   - server/Cargo.lock
   - server/Cargo.toml

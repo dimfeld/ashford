@@ -12,10 +12,15 @@ temp: false
 dependencies:
   - 2
 parent: 1
+references:
+  "1": 076d03b1-833c-4982-b0ca-1d8868d40e31
+  "2": 85389e56-6e82-4b14-b6ab-153a10439a6e
 issue: []
+pullRequest: []
 docs: []
 createdAt: 2025-11-29T01:31:38.085Z
 updatedAt: 2025-11-29T01:31:38.085Z
+progressNotes: []
 tasks: []
 tags:
   - queue

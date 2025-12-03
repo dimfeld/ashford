@@ -83,8 +83,6 @@ tasks:
 
       4. Updates any existing data to have org_id=1, user_id=1 (handled by
       DEFAULT)
-    files:
-      - server/migrations/004_add_org_user_columns.sql
   - title: Add hardcoded org/user ID constants
     done: true
     description: >
@@ -92,9 +90,6 @@ tasks:
       1.
 
       Export these from the ashford-core lib.rs.
-    files:
-      - server/crates/ashford-core/src/constants.rs
-      - server/crates/ashford-core/src/lib.rs
   - title: Update AccountRepository for org_id/user_id
     done: true
     description: |
@@ -105,8 +100,6 @@ tasks:
       4. Update create() to accept and insert org_id, user_id
       5. Update list methods to filter by org_id and optionally user_id
       6. Update existing tests to include org_id/user_id
-    files:
-      - server/crates/ashford-core/src/accounts.rs
   - title: Update ThreadRepository for org_id/user_id
     done: true
     description: |
@@ -117,8 +110,6 @@ tasks:
       4. Update create/upsert to accept and insert org_id, user_id
       5. Update list methods to filter by org_id, user_id
       6. Update existing tests
-    files:
-      - server/crates/ashford-core/src/threads.rs
   - title: Update MessageRepository for org_id/user_id
     done: true
     description: |
@@ -129,8 +120,6 @@ tasks:
       4. Update create/upsert to accept and insert org_id, user_id
       5. Update list methods to filter by org_id, user_id
       6. Update existing tests
-    files:
-      - server/crates/ashford-core/src/messages.rs
   - title: Update DecisionRepository for org_id/user_id
     done: true
     description: |
@@ -141,9 +130,6 @@ tasks:
       4. Update create to accept and insert org_id, user_id
       5. Update list methods to filter by org_id, user_id
       6. Update existing tests
-    files:
-      - server/crates/ashford-core/src/decisions/repositories.rs
-      - server/crates/ashford-core/src/decisions/mod.rs
   - title: Update ActionRepository for org_id/user_id
     done: true
     description: |
@@ -154,8 +140,6 @@ tasks:
       4. Update create to accept and insert org_id, user_id
       5. Update list methods to filter by org_id, user_id
       6. Update existing tests
-    files:
-      - server/crates/ashford-core/src/decisions/repositories.rs
   - title: Update DeterministicRuleRepository for org_id/user_id
     done: true
     description: >
@@ -174,9 +158,6 @@ tasks:
       matches org-wide)
 
       6. Update existing tests in rules/test_repositories.rs
-    files:
-      - server/crates/ashford-core/src/rules/repositories.rs
-      - server/crates/ashford-core/src/rules/test_repositories.rs
   - title: Update LlmRuleRepository for org_id/user_id
     done: true
     description: |
@@ -187,9 +168,6 @@ tasks:
       4. Update create to accept org_id (required), user_id (optional)
       5. Update list methods to filter by org_id, optionally by user_id
       6. Update existing tests
-    files:
-      - server/crates/ashford-core/src/rules/repositories.rs
-      - server/crates/ashford-core/src/rules/test_repositories.rs
   - title: Update DirectionsRepository for org_id/user_id
     done: true
     description: >
@@ -207,9 +185,6 @@ tasks:
       user_id
 
       6. Update existing tests
-    files:
-      - server/crates/ashford-core/src/rules/repositories.rs
-      - server/crates/ashford-core/src/rules/test_repositories.rs
   - title: Update RulesChatSessionRepository for org_id/user_id
     done: true
     description: |
@@ -218,8 +193,6 @@ tasks:
       2. Update column constants and row conversion
       3. Update create/list methods
       4. Update tests
-    files:
-      - server/crates/ashford-core/src/rules/repositories.rs
   - title: Update RulesChatMessageRepository for org_id/user_id
     done: true
     description: |
@@ -228,8 +201,6 @@ tasks:
       2. Update column constants and row conversion
       3. Update create/list methods
       4. Update tests
-    files:
-      - server/crates/ashford-core/src/rules/repositories.rs
   - title: Update callers to pass org_id/user_id from constants
     done: true
     description: >
@@ -245,10 +216,6 @@ tasks:
       - Rule management
 
       - Any HTTP handlers
-    files:
-      - server/crates/ashford-core/src/gmail/
-      - server/crates/ashford-core/src/decisions/
-      - server/crates/ashford-server/src/
   - title: Run all tests and fix any failures
     done: true
     description: >

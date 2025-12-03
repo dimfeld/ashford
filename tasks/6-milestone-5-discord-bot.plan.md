@@ -12,7 +12,11 @@ temp: false
 dependencies:
   - 5
 parent: 1
+references:
+  "1": 076d03b1-833c-4982-b0ca-1d8868d40e31
+  "5": 66785b19-e85d-4135-bbca-9d061a0394c7
 issue: []
+pullRequest: []
 docs:
   - docs/discord.md
   - docs/data_model.md
@@ -20,6 +24,7 @@ planGeneratedAt: 2025-11-29T01:23:12.400Z
 promptsGeneratedAt: 2025-11-29T01:23:12.400Z
 createdAt: 2025-11-29T01:21:26.968Z
 updatedAt: 2025-11-29T01:23:12.400Z
+progressNotes: []
 tasks:
   - title: Set up Discord bot client
     done: false

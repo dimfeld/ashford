@@ -12,7 +12,8 @@ container: false
 temp: false
 dependencies: []
 parent: 3
-references: {}
+references:
+  "3": b93a0b33-fccb-4f57-8c97-002039917c44
 issue: []
 pullRequest: []
 docs:
@@ -122,9 +123,6 @@ tasks:
       runs local HTTP server to receive callback, exchanges code for tokens, and
       outputs the token JSON for manual entry into the app. Use Google's
       installed app flow with localhost redirect."
-    files: []
-    docs: []
-    steps: []
 changedFiles:
   - server/Cargo.lock
   - server/Cargo.toml

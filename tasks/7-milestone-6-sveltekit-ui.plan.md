@@ -13,13 +13,18 @@ temp: false
 dependencies:
   - 6
 parent: 1
+references:
+  "1": 076d03b1-833c-4982-b0ca-1d8868d40e31
+  "6": 70ff7f0a-6830-49c0-91d1-e7ed93e09bbc
 issue: []
+pullRequest: []
 docs:
   - docs/web_ui.md
 planGeneratedAt: 2025-11-29T01:23:12.568Z
 promptsGeneratedAt: 2025-11-29T01:23:12.568Z
 createdAt: 2025-11-29T01:21:27.056Z
 updatedAt: 2025-11-29T01:23:12.568Z
+progressNotes: []
 tasks:
   - title: Initialize SvelteKit project
     done: false

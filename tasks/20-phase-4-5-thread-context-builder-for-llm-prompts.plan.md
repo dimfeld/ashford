@@ -1,6 +1,6 @@
 ---
 # yaml-language-server: $schema=https://raw.githubusercontent.com/dimfeld/llmutils/main/schema/rmplan-plan-schema.json
-title: "Thread Context Builder for LLM Prompts"
+title: Thread Context Builder for LLM Prompts
 goal: Build thread context summarization to enrich LLM decision prompts with
   conversation history
 id: 20
@@ -13,7 +13,9 @@ temp: false
 dependencies:
   - 16
 parent: 4
-references: {}
+references:
+  "4": 5cf4cc37-3eb8-4f89-adae-421a751d13a1
+  "16": b8c142c5-3335-4b87-9a94-28dbcc96af99
 issue: []
 pullRequest: []
 docs:

@@ -12,7 +12,11 @@ temp: false
 dependencies:
   - 7
 parent: 1
+references:
+  "1": 076d03b1-833c-4982-b0ca-1d8868d40e31
+  "7": 5a952985-9ed4-4035-8fef-479f3f7e2010
 issue: []
+pullRequest: []
 docs:
   - docs/rules_assistant.md
   - docs/web_ui.md
@@ -21,6 +25,7 @@ planGeneratedAt: 2025-11-29T01:23:12.736Z
 promptsGeneratedAt: 2025-11-29T01:23:12.736Z
 createdAt: 2025-11-29T01:21:27.146Z
 updatedAt: 2025-11-29T01:23:12.736Z
+progressNotes: []
 tasks:
   - title: Design assistant LLM prompt
     done: false

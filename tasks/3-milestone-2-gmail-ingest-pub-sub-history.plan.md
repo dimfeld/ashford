@@ -16,7 +16,12 @@ dependencies:
   - 11
   - 12
 parent: 1
-references: {}
+references:
+  "1": 076d03b1-833c-4982-b0ca-1d8868d40e31
+  "2": 85389e56-6e82-4b14-b6ab-153a10439a6e
+  "10": a0d2a8da-0146-4e99-9f3b-8c526bad5524
+  "11": 5b35e65e-3d87-45e5-98bc-45312701e05b
+  "12": 58b733a3-2f88-4b04-890f-23d394b9550b
 issue: []
 pullRequest: []
 docs:

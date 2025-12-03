@@ -13,7 +13,9 @@ temp: false
 dependencies:
   - 10
 parent: 3
-references: {}
+references:
+  "3": b93a0b33-fccb-4f57-8c97-002039917c44
+  "10": a0d2a8da-0146-4e99-9f3b-8c526bad5524
 issue: []
 pullRequest: []
 docs:

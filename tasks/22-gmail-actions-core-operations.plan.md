@@ -14,7 +14,9 @@ temp: false
 dependencies:
   - 25
 parent: 5
-references: {}
+references:
+  "5": 66785b19-e85d-4135-bbca-9d061a0394c7
+  "25": 0402f4e3-9063-4655-b42d-cef6910a6827
 issue: []
 pullRequest: []
 docs:
@@ -121,9 +123,6 @@ tasks:
       store that persists refreshed tokens back to the database. Use
       dispatcher.http for the HTTP client and dispatcher.gmail_api_base for API
       URL override. This pattern will be reused by all action handlers.
-    files: []
-    docs: []
-    steps: []
 tags:
   - actions
   - gmail
