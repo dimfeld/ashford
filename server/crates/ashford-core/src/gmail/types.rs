@@ -123,3 +123,33 @@ pub struct Profile {
     #[serde(rename = "historyId")]
     pub history_id: String,
 }
+
+/// Color information for a Gmail label.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LabelColor {
+    #[serde(rename = "backgroundColor")]
+    pub background_color: Option<String>,
+    #[serde(rename = "textColor")]
+    pub text_color: Option<String>,
+}
+
+/// A Gmail label from the labels.list API.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Label {
+    pub id: String,
+    pub name: String,
+    #[serde(rename = "type")]
+    pub label_type: Option<String>,
+    #[serde(rename = "messageListVisibility")]
+    pub message_list_visibility: Option<String>,
+    #[serde(rename = "labelListVisibility")]
+    pub label_list_visibility: Option<String>,
+    pub color: Option<LabelColor>,
+}
+
+/// Response from the Gmail Users.labels.list endpoint.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ListLabelsResponse {
+    #[serde(default)]
+    pub labels: Vec<Label>,
+}

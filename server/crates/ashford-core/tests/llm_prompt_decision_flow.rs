@@ -98,6 +98,7 @@ fn prompt_builder_includes_layers_and_task_directive() {
             updated_at: Utc::now(),
         }],
         None,
+        &[], // No available labels for this test
     );
 
     assert_eq!(prompt.len(), 2);

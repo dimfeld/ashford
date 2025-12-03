@@ -12,7 +12,9 @@ use crate::gmail::{
         DEFAULT_REFRESH_BUFFER, OAuthError, OAuthTokens, TOKEN_ENDPOINT, TokenStore,
         refresh_access_token_with_endpoint,
     },
-    types::{ListHistoryResponse, ListMessagesResponse, Message, Profile, Thread},
+    types::{
+        ListHistoryResponse, ListLabelsResponse, ListMessagesResponse, Message, Profile, Thread,
+    },
 };
 
 const DEFAULT_API_BASE: &str = "https://gmail.googleapis.com/gmail/v1/users";
@@ -140,6 +142,12 @@ impl<S: TokenStore> GmailClient<S> {
     /// Fetches the user's Gmail profile, including the current historyId.
     pub async fn get_profile(&self) -> Result<Profile, GmailClientError> {
         let url = format!("{}/{}/profile", self.api_base, self.user_id);
+        self.send_json(|| self.http.get(&url)).await
+    }
+
+    /// Fetches all labels for the user's Gmail account.
+    pub async fn list_labels(&self) -> Result<ListLabelsResponse, GmailClientError> {
+        let url = format!("{}/{}/labels", self.api_base, self.user_id);
         self.send_json(|| self.http.get(&url)).await
     }
 
@@ -808,5 +816,183 @@ mod tests {
         assert_eq!(profile.history_id, "98765");
         assert_eq!(profile.messages_total, Some(1234));
         assert_eq!(profile.threads_total, Some(567));
+    }
+
+    #[tokio::test]
+    async fn list_labels_returns_all_labels() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/gmail/v1/users/me/labels"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "labels": [
+                    {
+                        "id": "INBOX",
+                        "name": "INBOX",
+                        "type": "system",
+                        "messageListVisibility": "show",
+                        "labelListVisibility": "labelShow"
+                    },
+                    {
+                        "id": "Label_123456789",
+                        "name": "My Custom Label",
+                        "type": "user",
+                        "messageListVisibility": "show",
+                        "labelListVisibility": "labelShow",
+                        "color": {
+                            "backgroundColor": "#ffffff",
+                            "textColor": "#000000"
+                        }
+                    },
+                    {
+                        "id": "STARRED",
+                        "name": "STARRED",
+                        "type": "system"
+                    }
+                ]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let tokens = OAuthTokens {
+            access_token: "token".into(),
+            refresh_token: "refresh".into(),
+            expires_at: Utc::now() + Duration::hours(1),
+        };
+        let store = Arc::new(RecordingStore::default());
+        let client = make_client(&server, tokens, store);
+
+        let response = client.list_labels().await.expect("list_labels succeeds");
+
+        assert_eq!(response.labels.len(), 3);
+
+        // Check system label
+        let inbox = &response.labels[0];
+        assert_eq!(inbox.id, "INBOX");
+        assert_eq!(inbox.name, "INBOX");
+        assert_eq!(inbox.label_type.as_deref(), Some("system"));
+        assert_eq!(inbox.message_list_visibility.as_deref(), Some("show"));
+        assert!(inbox.color.is_none());
+
+        // Check user label with color
+        let custom = &response.labels[1];
+        assert_eq!(custom.id, "Label_123456789");
+        assert_eq!(custom.name, "My Custom Label");
+        assert_eq!(custom.label_type.as_deref(), Some("user"));
+        let color = custom.color.as_ref().expect("should have color");
+        assert_eq!(color.background_color.as_deref(), Some("#ffffff"));
+        assert_eq!(color.text_color.as_deref(), Some("#000000"));
+
+        // Check label without optional fields
+        let starred = &response.labels[2];
+        assert_eq!(starred.id, "STARRED");
+        assert_eq!(starred.name, "STARRED");
+        assert!(starred.message_list_visibility.is_none());
+        assert!(starred.label_list_visibility.is_none());
+    }
+
+    #[tokio::test]
+    async fn list_labels_handles_empty_response() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/gmail/v1/users/me/labels"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "labels": []
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let tokens = OAuthTokens {
+            access_token: "token".into(),
+            refresh_token: "refresh".into(),
+            expires_at: Utc::now() + Duration::hours(1),
+        };
+        let store = Arc::new(RecordingStore::default());
+        let client = make_client(&server, tokens, store);
+
+        let response = client.list_labels().await.expect("list_labels succeeds");
+
+        assert!(response.labels.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_labels_handles_minimal_label() {
+        let server = MockServer::start().await;
+
+        // A label with only required fields (id and name)
+        Mock::given(method("GET"))
+            .and(path("/gmail/v1/users/me/labels"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "labels": [
+                    {
+                        "id": "Label_minimal",
+                        "name": "Minimal Label"
+                    }
+                ]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let tokens = OAuthTokens {
+            access_token: "token".into(),
+            refresh_token: "refresh".into(),
+            expires_at: Utc::now() + Duration::hours(1),
+        };
+        let store = Arc::new(RecordingStore::default());
+        let client = make_client(&server, tokens, store);
+
+        let response = client.list_labels().await.expect("list_labels succeeds");
+
+        assert_eq!(response.labels.len(), 1);
+        let label = &response.labels[0];
+        assert_eq!(label.id, "Label_minimal");
+        assert_eq!(label.name, "Minimal Label");
+        assert!(label.label_type.is_none());
+        assert!(label.message_list_visibility.is_none());
+        assert!(label.label_list_visibility.is_none());
+        assert!(label.color.is_none());
+    }
+
+    #[tokio::test]
+    async fn list_labels_handles_label_with_partial_color() {
+        let server = MockServer::start().await;
+
+        // Color with only background, missing text color
+        Mock::given(method("GET"))
+            .and(path("/gmail/v1/users/me/labels"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "labels": [
+                    {
+                        "id": "Label_partial_color",
+                        "name": "Partial Color Label",
+                        "color": {
+                            "backgroundColor": "#ff0000"
+                        }
+                    }
+                ]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let tokens = OAuthTokens {
+            access_token: "token".into(),
+            refresh_token: "refresh".into(),
+            expires_at: Utc::now() + Duration::hours(1),
+        };
+        let store = Arc::new(RecordingStore::default());
+        let client = make_client(&server, tokens, store);
+
+        let response = client.list_labels().await.expect("list_labels succeeds");
+
+        assert_eq!(response.labels.len(), 1);
+        let label = &response.labels[0];
+        let color = label.color.as_ref().expect("should have color");
+        assert_eq!(color.background_color.as_deref(), Some("#ff0000"));
+        assert!(color.text_color.is_none());
     }
 }

@@ -18,6 +18,54 @@ CREATE UNIQUE INDEX accounts_email_idx ON accounts(email);
 
 ⸻
 
+labels
+
+Stores Gmail labels synced from the provider. Labels are synced periodically from Gmail
+and used to provide semantic context to the LLM during classification.
+
+CREATE TABLE labels (
+  id TEXT PRIMARY KEY,
+  account_id TEXT NOT NULL,
+  provider_label_id TEXT NOT NULL,     -- Gmail's label ID (e.g., "INBOX" or "Label_123")
+  name TEXT NOT NULL,                  -- Display name from Gmail
+  label_type TEXT NOT NULL,            -- "system" or "user"
+  description TEXT,                    -- Optional, user-provided for LLM context
+  available_to_classifier INTEGER NOT NULL DEFAULT 1,
+  message_list_visibility TEXT,        -- "show", "hide", etc.
+  label_list_visibility TEXT,          -- "labelShow", "labelHide", etc.
+  background_color TEXT,               -- Hex color from Gmail
+  text_color TEXT,                     -- Hex color from Gmail
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  org_id INTEGER NOT NULL DEFAULT 1,
+  user_id INTEGER NOT NULL DEFAULT 1,
+
+  FOREIGN KEY (account_id) REFERENCES accounts(id)
+);
+
+CREATE UNIQUE INDEX labels_account_provider_uidx ON labels(account_id, provider_label_id);
+CREATE INDEX labels_org_user_idx ON labels(org_id, user_id);
+CREATE INDEX labels_account_idx ON labels(account_id);
+
+**Key Features:**
+- `provider_label_id` stores Gmail's stable label ID (survives renames)
+- `name` is the human-readable display name synced from Gmail
+- `description` is user-editable for providing LLM context (e.g., "Work emails from clients")
+- `available_to_classifier` controls whether the label appears in LLM prompts
+- User-editable fields (description, available_to_classifier) are preserved during sync updates
+
+**Repository Methods:**
+- `upsert(label)` - Insert or update by (account_id, provider_label_id), preserving user-editable fields
+- `get_by_account(account_id)` - List all labels for an account
+- `get_by_provider_id(account_id, provider_label_id)` - Lookup by Gmail label ID
+- `get_by_name(account_id, name)` - Case-insensitive lookup for LLM response translation
+- `get_available_for_classifier(account_id)` - Labels for LLM prompt building
+- `delete_not_in_provider_ids(account_id, ids)` - Remove labels deleted in Gmail
+- `find_deleted_label_ids(account_id, current_ids)` - Identify deleted labels for rule disabling
+
+
+⸻
+
 threads
 
 CREATE TABLE threads (
@@ -252,6 +300,7 @@ CREATE TABLE deterministic_rules (
   scope_ref TEXT,                      -- account_id, domain, or sender email
   priority INTEGER NOT NULL DEFAULT 100,
   enabled INTEGER NOT NULL DEFAULT 1,
+  disabled_reason TEXT,                -- explains why rule was auto-disabled (e.g., label deleted)
   conditions_json TEXT NOT NULL,       -- structured condition tree
   action_type TEXT NOT NULL,           -- primary action
   action_parameters_json TEXT NOT NULL,
@@ -265,6 +314,12 @@ CREATE INDEX deterministic_rules_scope_idx
 
 CREATE INDEX deterministic_rules_priority_idx
   ON deterministic_rules(enabled, priority);
+
+**Notes:**
+- `disabled_reason` is populated when the system auto-disables a rule (e.g., when a referenced
+  label is deleted in Gmail). This provides clear feedback to users about why a rule stopped working.
+- Rules referencing deleted labels are soft-disabled (enabled=0, disabled_reason set) rather than
+  deleted, allowing users to review and fix them.
 
 
 ⸻

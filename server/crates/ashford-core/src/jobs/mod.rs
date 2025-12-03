@@ -13,19 +13,21 @@ use crate::rules::ExecutorError;
 use crate::worker::{JobError, JobExecutor};
 use crate::{Database, Job, JobContext};
 
-mod backfill_gmail;
 mod action_gmail;
 mod approval_notify;
+mod backfill_gmail;
 mod classify;
 mod history_sync_gmail;
 mod ingest_gmail;
+mod labels_sync_gmail;
 
-use backfill_gmail::handle_backfill_gmail;
 use action_gmail::handle_action_gmail;
 use approval_notify::handle_approval_notify;
+use backfill_gmail::handle_backfill_gmail;
 use classify::handle_classify;
 use history_sync_gmail::handle_history_sync_gmail;
 use ingest_gmail::handle_ingest_gmail;
+use labels_sync_gmail::handle_labels_sync_gmail;
 
 pub const JOB_TYPE_ACTION_GMAIL: &str = action_gmail::JOB_TYPE;
 pub const JOB_TYPE_APPROVAL_NOTIFY: &str = approval_notify::JOB_TYPE;
@@ -33,6 +35,7 @@ pub const JOB_TYPE_BACKFILL_GMAIL: &str = backfill_gmail::JOB_TYPE;
 pub const JOB_TYPE_CLASSIFY: &str = "classify";
 pub const JOB_TYPE_INGEST_GMAIL: &str = "ingest.gmail";
 pub const JOB_TYPE_HISTORY_SYNC_GMAIL: &str = "history.sync.gmail";
+pub const JOB_TYPE_LABELS_SYNC_GMAIL: &str = labels_sync_gmail::JOB_TYPE;
 
 #[derive(Clone)]
 pub struct JobDispatcher {
@@ -75,6 +78,7 @@ impl JobExecutor for JobDispatcher {
             JOB_TYPE_CLASSIFY => handle_classify(self, job).await,
             JOB_TYPE_INGEST_GMAIL => handle_ingest_gmail(self, job).await,
             JOB_TYPE_HISTORY_SYNC_GMAIL => handle_history_sync_gmail(self, job).await,
+            JOB_TYPE_LABELS_SYNC_GMAIL => handle_labels_sync_gmail(self, job).await,
             other => Err(JobError::Fatal(format!("unknown job type: {other}"))),
         }
     }
@@ -166,14 +170,16 @@ pub(crate) fn map_action_error(context: &str, err: ActionError) -> JobError {
         ActionError::InvalidStatus(status) => {
             JobError::Fatal(format!("{context}: invalid status {status}"))
         }
-        ActionError::InvalidInitialStatus(status) => JobError::Fatal(format!(
-            "{context}: invalid initial status {status:?}"
-        )),
+        ActionError::InvalidInitialStatus(status) => {
+            JobError::Fatal(format!("{context}: invalid initial status {status:?}"))
+        }
         ActionError::InvalidStatusTransition { from, to } => JobError::Fatal(format!(
             "{context}: invalid status transition {from:?}->{to:?}"
         )),
         ActionError::Json(err) => JobError::Fatal(format!("{context}: decode error {err}")),
-        ActionError::DateTimeParse(err) => JobError::Fatal(format!("{context}: decode error {err}")),
+        ActionError::DateTimeParse(err) => {
+            JobError::Fatal(format!("{context}: decode error {err}"))
+        }
         ActionError::Database(err) => JobError::retryable(format!("{context}: db error {err}")),
         ActionError::Sql(err) => JobError::retryable(format!("{context}: db error {err}")),
     }

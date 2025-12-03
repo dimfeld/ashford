@@ -10,6 +10,7 @@
     - outbound.send - Send auto_reply/forward emails
     - backfill.gmail - Bulk sync historical messages
     - history.sync.gmail - Incremental sync via Gmail History API
+    - labels.sync.gmail - Sync labels from Gmail API and handle deleted labels
 
 - **States**:
 
@@ -91,6 +92,7 @@ Job type constants are defined in `server/crates/ashford-core/src/jobs/mod.rs`:
 - `JOB_TYPE_CLASSIFY` = "classify"
 - `JOB_TYPE_HISTORY_SYNC_GMAIL` = "history.sync.gmail"
 - `JOB_TYPE_BACKFILL_GMAIL` = "backfill.gmail"
+- `JOB_TYPE_LABELS_SYNC_GMAIL` = "labels.sync.gmail"
 
 ### **5.4 Error Handling**
 
@@ -143,4 +145,35 @@ The classify job orchestrates the full decision pipeline:
 Rules are merged and deduplicated by ID.
 
 The classify job is enqueued by `ingest.gmail` after a message is persisted.
+
+### **5.6 Labels Sync Job**
+
+The labels sync job synchronizes Gmail labels to the local database and handles deleted labels.
+
+**Payload**:
+```json
+{
+  "account_id": "uuid"
+}
+```
+
+**Flow**:
+1. Parse payload and load account from database
+2. Refresh OAuth tokens if needed
+3. Call Gmail `users.labels.list` API
+4. Detect deleted labels by comparing local DB with API response
+5. For each deleted label:
+   - Find rules referencing the deleted label (in conditions or action parameters)
+   - Disable each rule with reason: "Label 'X' was deleted from Gmail"
+   - Delete the label from local database
+6. Upsert all labels from API response (preserves user-editable fields like description and available_to_classifier)
+
+**Idempotency key**: `labels.sync.gmail:{account_id}`
+
+**Triggering**:
+- On account setup (initial sync)
+- Periodically on a schedule (e.g., hourly)
+- Can be triggered manually/on-demand
+
+The labels sync job ensures rules remain valid by soft-disabling rules that reference deleted labels rather than deleting them, allowing users to review and fix affected rules.
 

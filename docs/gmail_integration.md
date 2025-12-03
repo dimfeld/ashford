@@ -21,6 +21,28 @@ CREATE TABLE accounts (
       updated_at TEXT NOT NULL
     );
 ```
+
+### **6.1.1 Gmail Labels**
+
+Labels are synced from Gmail and stored locally to:
+1. Provide semantic context to the LLM during classification (names + descriptions)
+2. Enable stable rule references using label IDs (survives Gmail label renames)
+3. Detect deleted labels and auto-disable affected rules
+
+**Label Sync Process:**
+- Labels are fetched via Gmail's `users.labels.list` API
+- Sync occurs on account setup and periodically thereafter
+- Local labels are upserted by (account_id, provider_label_id)
+- User-editable fields (description, available_to_classifier) are preserved on sync
+- Labels deleted in Gmail trigger soft-disabling of dependent rules
+
+**Label Translation:**
+- Gmail messages store label IDs (e.g., "Label_123456789" for custom labels)
+- LLM prompts show human-readable names + descriptions for better classification
+- LLM responses with label names are translated back to IDs before action storage
+- System labels (INBOX, SENT, etc.) have IDs matching their names
+
+See the `labels` table in data_model.md for schema details.
   
 
 ### **6.2 Pub/Sub + History Flow**

@@ -49,7 +49,7 @@ The engine receives:
 
 10.3 Prompt Construction
 
-The prompt is constructed from five clearly separated layers.
+The prompt is constructed from six clearly separated layers.
 This structure is critical for auditability, debugging, and predictable behavior.
 
 ⸻
@@ -118,7 +118,7 @@ This contains all structured data about the message:
 	•	Snippet
 	•	Relevant headers
 	•	Message body (plain text, compacted)
-	•	Current Gmail labels
+	•	Current Gmail labels (by ID)
 	•	Thread summary (previous labels, actions, participants)
 
 The engine ensures message content is safe (e.g., stripped of extremely long HTML, rewritten for the model) before insertion.
@@ -135,7 +135,29 @@ Body (plain): ...
 
 ⸻
 
-Layer 5 — TASK Directive
+Layer 5 — Available Labels
+
+This section lists all available labels the LLM can apply, with human-readable names and optional descriptions.
+Only labels where `available_to_classifier=true` are included.
+
+Labels are formatted as:
+- `{name}` if no description
+- `{name}: {description}` if description exists
+
+Example inserted content:
+
+AVAILABLE LABELS:
+- Work: Emails related to work projects
+- Personal
+- Receipts: Purchase confirmations and invoices
+- Finance/Invoices: Financial documents
+
+This section enables the LLM to make semantically meaningful label choices.
+The LLM returns label names in its response, which are then translated back to label IDs before action storage.
+
+⸻
+
+Layer 6 — TASK Directive
 
 The final section specifies what the model must do:
 	•	Call the `record_decision` tool with the decision
@@ -175,15 +197,27 @@ The decision contract remains the same as defined earlier in the spec, represent
 
 After receiving the model output:
 	1.	Validate JSON strictly (schema validation + semantic validation).
-	2.	Apply Safety Enforcement via `SafetyEnforcer`:
+	2.	**Translate label names to IDs**: For `apply_label` actions, translate the human-readable label name returned by the LLM to the stable Gmail label ID. This uses case-insensitive matching.
+	3.	Apply Safety Enforcement via `SafetyEnforcer`:
 	•	Check danger level, confidence, approval_always list, and LLM advisory flag.
 	•	Dangerous actions always require approval.
-	3.	Persist decisions record with safety telemetry.
-	4.	Enqueue next job:
+	4.	Persist decisions record with safety telemetry.
+	5.	Enqueue next job:
 	•	Auto-run safe actions, or
 	•	Create an approval request for Discord.
 
 This guarantees deterministic, auditable behavior even when the LLM output is imperfect.
+
+#### Label Name Translation
+
+When the LLM returns an `apply_label` action, the label name in the parameters is translated to a Gmail label ID:
+
+1. The LLM receives human-readable label names with descriptions in the prompt (e.g., "Work", "Receipts")
+2. The LLM responds with label names in action parameters (e.g., `{"label": "Work"}`)
+3. The classify job translates the name to the provider label ID (e.g., `{"label": "Label_123456789"}`)
+4. The action is stored with the stable label ID, making it resilient to Gmail label renames
+
+If the LLM returns a label name that doesn't exist in the available labels, a warning is logged but the action continues with the original name. This graceful degradation prevents classification failures due to minor mismatches.
 
 #### SafetyEnforcer
 
@@ -370,11 +404,11 @@ Rust side:
 
 The LLM Decision Engine implementation is split into two modules:
 - `server/crates/ashford-core/src/llm/decision.rs` - Decision types and parsing
-- `server/crates/ashford-core/src/llm/prompt.rs` - 5-layer prompt construction
+- `server/crates/ashford-core/src/llm/prompt.rs` - 6-layer prompt construction
 
 #### Prompt Builder
 
-The `PromptBuilder` constructs the 5-layer prompt from message context, directions, and LLM rules:
+The `PromptBuilder` constructs the 6-layer prompt from message context, directions, LLM rules, and available labels:
 
 ```rust
 use ashford_core::llm::{PromptBuilder, PromptBuilderConfig, ThreadContext};
@@ -390,16 +424,17 @@ let builder = PromptBuilder::with_config(PromptBuilderConfig {
 
 // Build the prompt messages
 let messages = builder.build(
-    &message,       // &Message - the email to classify
-    &directions,    // &[Direction] - enabled global guardrails
-    &llm_rules,     // &[LlmRule] - applicable LLM rules
-    None,           // Option<&ThreadContext> - reserved for future thread summaries
+    &message,           // &Message - the email to classify
+    &directions,        // &[Direction] - enabled global guardrails
+    &llm_rules,         // &[LlmRule] - applicable LLM rules
+    None,               // Option<&ThreadContext> - reserved for future thread summaries
+    &available_labels,  // &[Label] - labels available for classification
 );
 ```
 
 The `build()` method returns a `Vec<ChatMessage>` with exactly 2 messages:
 1. **System message** (ChatRole::System) - role definition, output contract, safety guidelines
-2. **User message** (ChatRole::User) - combined DIRECTIONS, LLM RULES, MESSAGE CONTEXT, and TASK sections
+2. **User message** (ChatRole::User) - combined DIRECTIONS, LLM RULES, MESSAGE CONTEXT, AVAILABLE LABELS, and TASK sections
 
 ##### Body Text Processing
 
@@ -412,7 +447,7 @@ The prompt builder includes utilities for safely processing email content:
 
 ##### Empty Sections
 
-When directions or LLM rules are empty, those sections are omitted entirely from the prompt (not included as empty sections).
+When directions, LLM rules, or available labels are empty, those sections are omitted entirely from the prompt (not included as empty sections).
 
 ##### Message Context Format
 

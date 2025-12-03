@@ -41,6 +41,7 @@ Each deterministic rule includes:
 	•	scope_ref (account_id, domain name, or sender email)
 	•	priority (lower = earlier evaluation)
 	•	enabled flag
+	•	disabled_reason — explains why a rule was auto-disabled (e.g., "Label 'Work' was deleted from Gmail")
 	•	conditions_json — structured boolean condition tree:
 	•	Sender email exact / wildcard match
 	•	Sender domain
@@ -67,6 +68,16 @@ Each deterministic rule includes:
 	•	Otherwise → dangerous actions require Discord approval.
 
 Deterministic rules give the user explicit, stable behavior—ideal for high-volume or predictable senders.
+
+3.2.3 Auto-Disabled Rules
+
+Rules can be automatically disabled by the system when their dependencies become invalid:
+
+- **Deleted Labels**: When a Gmail label referenced by a rule is deleted, the rule is soft-disabled with `disabled_reason` set (e.g., "Label 'Work' was deleted from Gmail")
+- **Preservation**: Disabled rules are not deleted, allowing users to review and fix them
+- **Re-enabling**: Users can update the rule to reference a valid label and re-enable it
+
+The `disabled_reason` field provides clear feedback about why a rule stopped working.
 
 ⸻
 

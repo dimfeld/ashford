@@ -18,10 +18,7 @@ struct ActionJobPayload {
 /// Execute a Gmail action. This is currently a placeholder that marks the
 /// action as executed so the pipeline can continue; provider-side mutations
 /// will be implemented in a later phase.
-pub async fn handle_action_gmail(
-    dispatcher: &JobDispatcher,
-    job: Job,
-) -> Result<(), JobError> {
+pub async fn handle_action_gmail(dispatcher: &JobDispatcher, job: Job) -> Result<(), JobError> {
     let payload: ActionJobPayload = serde_json::from_value(job.payload.clone())
         .map_err(|err| JobError::Fatal(format!("invalid action.gmail payload: {err}")))?;
 
@@ -42,15 +39,21 @@ pub async fn handle_action_gmail(
         ActionStatus::Queued => {
             repo.mark_executing(DEFAULT_ORG_ID, DEFAULT_USER_ID, &action.id)
                 .await
-                .map_err(|err| JobError::retryable(format!("failed to mark action executing: {err}")))?;
+                .map_err(|err| {
+                    JobError::retryable(format!("failed to mark action executing: {err}"))
+                })?;
             repo.mark_completed(DEFAULT_ORG_ID, DEFAULT_USER_ID, &action.id)
                 .await
-                .map_err(|err| JobError::retryable(format!("failed to mark action completed: {err}")))?;
+                .map_err(|err| {
+                    JobError::retryable(format!("failed to mark action completed: {err}"))
+                })?;
         }
         ActionStatus::Executing => {
             repo.mark_completed(DEFAULT_ORG_ID, DEFAULT_USER_ID, &action.id)
                 .await
-                .map_err(|err| JobError::retryable(format!("failed to mark action completed: {err}")))?;
+                .map_err(|err| {
+                    JobError::retryable(format!("failed to mark action completed: {err}"))
+                })?;
         }
         _ => {
             // Already processed or awaiting approval; nothing to do.

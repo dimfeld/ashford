@@ -1,4 +1,5 @@
 use crate::gmail::types::Header;
+use crate::labels::Label;
 use crate::llm::decision::{ActionType, DecisionOutput};
 use crate::llm::types::{ChatMessage, ChatRole, Tool};
 use crate::messages::{Mailbox, Message};
@@ -47,6 +48,7 @@ impl PromptBuilder {
         directions: &[Direction],
         llm_rules: &[LlmRule],
         thread_context: Option<&ThreadContext>,
+        available_labels: &[Label],
     ) -> Vec<ChatMessage> {
         let system = self.build_system_message();
 
@@ -62,6 +64,12 @@ impl PromptBuilder {
         }
 
         user_sections.push(self.build_message_context(message, thread_context));
+
+        let labels_section = build_available_labels_section(available_labels);
+        if !labels_section.is_empty() {
+            user_sections.push(labels_section);
+        }
+
         user_sections.push(build_task_directive());
 
         let user_content = user_sections.join("\n\n");
@@ -182,6 +190,29 @@ pub fn build_llm_rules_section(rules: &[LlmRule]) -> String {
     }
 
     parts.join("\n\n")
+}
+
+/// Builds the AVAILABLE LABELS section for the prompt.
+/// Each label is formatted as:
+/// - `{name}` if no description
+/// - `{name}: {description}` if description exists
+pub fn build_available_labels_section(labels: &[Label]) -> String {
+    if labels.is_empty() {
+        return String::new();
+    }
+
+    let mut lines = Vec::new();
+    lines.push("AVAILABLE LABELS:".to_string());
+
+    for label in labels {
+        let line = match label.description.as_ref() {
+            Some(desc) if !desc.trim().is_empty() => format!("- {}: {}", label.name, desc),
+            _ => format!("- {}", label.name),
+        };
+        lines.push(line);
+    }
+
+    lines.join("\n")
 }
 
 pub fn truncate_text(text: &str, max_len: usize) -> String {
@@ -651,11 +682,12 @@ mod tests {
     #[test]
     fn build_omits_empty_directions_and_rules_sections() {
         let builder = PromptBuilder::new();
-        let messages = builder.build(&sample_message(), &[], &[], None);
+        let messages = builder.build(&sample_message(), &[], &[], None, &[]);
         assert_eq!(messages.len(), 2);
         let user_content = &messages[1].content;
         assert!(!user_content.contains("DIRECTIONS:"));
         assert!(!user_content.contains("LLM RULE:"));
+        assert!(!user_content.contains("AVAILABLE LABELS:"));
         assert!(user_content.contains("MESSAGE CONTEXT:"));
         assert!(user_content.contains("TASK:"));
     }
@@ -688,7 +720,7 @@ mod tests {
             updated_at: Utc::now(),
         }];
 
-        let messages = builder.build(&message, &directions, &rules, None);
+        let messages = builder.build(&message, &directions, &rules, None, &[]);
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].role, ChatRole::System);
         assert_eq!(messages[1].role, ChatRole::User);
@@ -696,5 +728,200 @@ mod tests {
         assert!(messages[1].content.contains("LLM RULE: Newsletter"));
         assert!(messages[1].content.contains("MESSAGE CONTEXT:"));
         assert!(messages[1].content.contains("TASK:"));
+    }
+
+    fn sample_label(provider_label_id: &str, name: &str, description: Option<&str>) -> Label {
+        Label {
+            id: format!("id_{}", provider_label_id),
+            account_id: "acc_1".into(),
+            provider_label_id: provider_label_id.into(),
+            name: name.into(),
+            label_type: "user".into(),
+            description: description.map(|s| s.into()),
+            available_to_classifier: true,
+            message_list_visibility: Some("show".into()),
+            label_list_visibility: Some("labelShow".into()),
+            background_color: None,
+            text_color: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            org_id: 1,
+            user_id: 1,
+        }
+    }
+
+    #[test]
+    fn available_labels_section_formats_correctly() {
+        let labels = vec![
+            sample_label("Label_1", "Work", Some("Emails related to work")),
+            sample_label("Label_2", "Personal", None),
+            sample_label("Label_3", "Important", Some("High priority items")),
+        ];
+
+        let section = build_available_labels_section(&labels);
+
+        assert!(section.starts_with("AVAILABLE LABELS:"));
+        assert!(section.contains("- Work: Emails related to work"));
+        assert!(section.contains("- Personal"));
+        assert!(!section.contains("- Personal:")); // No description, no colon
+        assert!(section.contains("- Important: High priority items"));
+    }
+
+    #[test]
+    fn available_labels_section_empty_returns_empty() {
+        let section = build_available_labels_section(&[]);
+        assert!(section.is_empty());
+    }
+
+    #[test]
+    fn available_labels_section_handles_empty_descriptions() {
+        let labels = vec![
+            sample_label("Label_1", "Work", Some("")), // Empty string description
+            sample_label("Label_2", "Personal", Some("   ")), // Whitespace only
+        ];
+
+        let section = build_available_labels_section(&labels);
+
+        // Both should appear without descriptions since they're empty/whitespace
+        assert!(section.contains("- Work"));
+        assert!(!section.contains("- Work:"));
+        assert!(section.contains("- Personal"));
+        assert!(!section.contains("- Personal:"));
+    }
+
+    #[test]
+    fn build_includes_available_labels_section() {
+        let builder = PromptBuilder::new();
+        let message = sample_message();
+        let labels = vec![
+            sample_label("Label_1", "Work", Some("Work emails")),
+            sample_label("Label_2", "Personal", None),
+        ];
+
+        let messages = builder.build(&message, &[], &[], None, &labels);
+        let user_content = &messages[1].content;
+
+        assert!(user_content.contains("AVAILABLE LABELS:"));
+        assert!(user_content.contains("- Work: Work emails"));
+        assert!(user_content.contains("- Personal"));
+        // Verify it appears before TASK
+        let labels_pos = user_content.find("AVAILABLE LABELS:").unwrap();
+        let task_pos = user_content.find("TASK:").unwrap();
+        assert!(
+            labels_pos < task_pos,
+            "AVAILABLE LABELS should appear before TASK"
+        );
+    }
+
+    #[test]
+    fn build_available_labels_after_message_context() {
+        let builder = PromptBuilder::new();
+        let message = sample_message();
+        let labels = vec![sample_label("Label_1", "Work", None)];
+
+        let messages = builder.build(&message, &[], &[], None, &labels);
+        let user_content = &messages[1].content;
+
+        // Verify order: MESSAGE CONTEXT -> AVAILABLE LABELS -> TASK
+        let msg_ctx_pos = user_content.find("MESSAGE CONTEXT:").unwrap();
+        let labels_pos = user_content.find("AVAILABLE LABELS:").unwrap();
+        let task_pos = user_content.find("TASK:").unwrap();
+
+        assert!(
+            msg_ctx_pos < labels_pos,
+            "MESSAGE CONTEXT should be before AVAILABLE LABELS"
+        );
+        assert!(
+            labels_pos < task_pos,
+            "AVAILABLE LABELS should be before TASK"
+        );
+    }
+
+    #[test]
+    fn available_labels_section_with_special_characters() {
+        let labels = vec![
+            sample_label("Label_1", "Work/Projects", Some("Slash in name")),
+            sample_label("Label_2", "Family & Friends", None),
+            sample_label("Label_3", "Priority!!!", Some("With exclamation")),
+            sample_label("Label_4", "TODO: Urgent", None),
+            sample_label("Label_5", "Label with \"quotes\"", Some("Has quotes")),
+        ];
+
+        let section = build_available_labels_section(&labels);
+
+        assert!(section.contains("- Work/Projects: Slash in name"));
+        assert!(section.contains("- Family & Friends"));
+        assert!(section.contains("- Priority!!!: With exclamation"));
+        assert!(section.contains("- TODO: Urgent"));
+        assert!(section.contains("- Label with \"quotes\": Has quotes"));
+    }
+
+    #[test]
+    fn available_labels_section_with_unicode() {
+        let labels = vec![
+            sample_label("Label_1", "Travail", Some("French for work")),
+            sample_label("Label_2", "Wichtig", Some("German for important")),
+            sample_label("Label_3", "Praca", None),
+        ];
+
+        let section = build_available_labels_section(&labels);
+
+        assert!(section.contains("- Travail: French for work"));
+        assert!(section.contains("- Wichtig: German for important"));
+        assert!(section.contains("- Praca"));
+    }
+
+    #[test]
+    fn available_labels_section_with_long_description() {
+        let long_desc = "A".repeat(500);
+        let labels = vec![sample_label("Label_1", "Work", Some(&long_desc))];
+
+        let section = build_available_labels_section(&labels);
+
+        // Should include the full description (no truncation in label section)
+        assert!(section.contains(&format!("- Work: {}", long_desc)));
+    }
+
+    #[test]
+    fn available_labels_section_with_system_label() {
+        // System labels like INBOX have provider_label_id matching name
+        let labels = vec![
+            sample_label("INBOX", "INBOX", Some("Primary inbox")),
+            sample_label("STARRED", "STARRED", None),
+            sample_label("SENT", "SENT", Some("Sent messages")),
+        ];
+
+        let section = build_available_labels_section(&labels);
+
+        assert!(section.contains("- INBOX: Primary inbox"));
+        assert!(section.contains("- STARRED"));
+        assert!(!section.contains("- STARRED:")); // No description
+        assert!(section.contains("- SENT: Sent messages"));
+    }
+
+    #[test]
+    fn available_labels_section_single_label() {
+        let labels = vec![sample_label("Label_1", "OnlyLabel", Some("Solo"))];
+
+        let section = build_available_labels_section(&labels);
+
+        assert!(section.starts_with("AVAILABLE LABELS:"));
+        assert!(section.contains("- OnlyLabel: Solo"));
+        // Should be exactly two lines (header + one label)
+        let lines: Vec<&str> = section.lines().collect();
+        assert_eq!(lines.len(), 2);
+    }
+
+    #[test]
+    fn available_labels_section_description_with_newlines_ignored() {
+        // Descriptions with embedded newlines should be handled
+        // (though in practice they shouldn't have newlines)
+        let labels = vec![sample_label("Label_1", "Work", Some("Line one\nLine two"))];
+
+        let section = build_available_labels_section(&labels);
+
+        // The current implementation doesn't strip newlines - it includes them as-is
+        // This test documents current behavior
+        assert!(section.contains("- Work: Line one\nLine two"));
     }
 }

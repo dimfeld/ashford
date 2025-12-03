@@ -213,6 +213,7 @@ mod tests {
             scope_ref: scope_ref.map(|s| s.to_string()),
             priority,
             enabled,
+            disabled_reason: None,
             conditions_json,
             action_type: "label".into(),
             action_parameters_json: serde_json::json!({"label": "Applied"}),

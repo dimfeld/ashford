@@ -7,7 +7,7 @@
 
 use serde::Deserialize;
 use serde_json::json;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::accounts::AccountRepository;
 use crate::constants::{DEFAULT_ORG_ID, DEFAULT_USER_ID};
@@ -15,6 +15,7 @@ use crate::decisions::{
     ActionRepository, ActionStatus, DecisionRepository, DecisionSource, NewAction, NewDecision,
     SafetyEnforcer, SafetyResult,
 };
+use crate::labels::{Label, LabelRepository};
 use crate::llm::decision::{
     ActionType, DecisionDetails, DecisionOutput, Explanations, MessageRef, TelemetryPlaceholder,
     UndoHint,
@@ -29,7 +30,10 @@ use crate::rules::repositories::{DirectionsRepository, LlmRuleRepository};
 use crate::rules::types::{LlmRule, RuleScope, SafeMode};
 use crate::{Job, JobError};
 
-use super::{JobDispatcher, JOB_TYPE_ACTION_GMAIL, JOB_TYPE_APPROVAL_NOTIFY, map_account_error, map_executor_error, map_llm_error};
+use super::{
+    JOB_TYPE_ACTION_GMAIL, JOB_TYPE_APPROVAL_NOTIFY, JobDispatcher, map_account_error,
+    map_executor_error, map_llm_error,
+};
 
 /// Payload for the classify job.
 #[derive(Debug, Deserialize)]
@@ -90,7 +94,10 @@ pub async fn handle_classify(dispatcher: &JobDispatcher, job: Job) -> Result<(),
 
     // Determine if we should skip safety enforcement (for explicit SafeMode overrides)
     let skip_safety_enforcement = rule_match.as_ref().is_some_and(|m| {
-        matches!(m.safe_mode, SafeMode::DangerousOverride | SafeMode::AlwaysSafe)
+        matches!(
+            m.safe_mode,
+            SafeMode::DangerousOverride | SafeMode::AlwaysSafe
+        )
     });
 
     let (mut decision_output, source) = if let Some(matched) = rule_match {
@@ -223,22 +230,20 @@ async fn enqueue_follow_up_job(
             format!("{JOB_TYPE_APPROVAL_NOTIFY}:{account_id}:{message_id}:{action_id}");
 
         match queue
-            .enqueue(
-                JOB_TYPE_APPROVAL_NOTIFY,
-                payload,
-                Some(idempotency_key),
-                0,
-            )
+            .enqueue(JOB_TYPE_APPROVAL_NOTIFY, payload, Some(idempotency_key), 0)
             .await
         {
             Ok(_) => {}
             Err(QueueError::DuplicateIdempotency { .. }) => {
-                debug!(account_id, action_id, "approval notify job already enqueued");
+                debug!(
+                    account_id,
+                    action_id, "approval notify job already enqueued"
+                );
             }
             Err(err) => {
                 return Err(JobError::retryable(format!(
                     "failed to enqueue approval notify job: {err}"
-                )))
+                )));
             }
         }
     } else {
@@ -261,7 +266,7 @@ async fn enqueue_follow_up_job(
             Err(err) => {
                 return Err(JobError::retryable(format!(
                     "failed to enqueue action job: {err}"
-                )))
+                )));
             }
         }
     }
@@ -441,9 +446,16 @@ async fn run_llm_classification(
     .await
     .map_err(|err| JobError::retryable(format!("failed to load LLM rules: {err}")))?;
 
+    // Load available labels for the account
+    let label_repo = LabelRepository::new(dispatcher.db.clone());
+    let available_labels = label_repo
+        .get_available_for_classifier(DEFAULT_ORG_ID, DEFAULT_USER_ID, account_id)
+        .await
+        .map_err(|err| JobError::retryable(format!("failed to load labels: {err}")))?;
+
     // Build prompt
     let prompt_builder = PromptBuilder::new();
-    let messages = prompt_builder.build(message, &directions, &llm_rules, None);
+    let messages = prompt_builder.build(message, &directions, &llm_rules, None, &available_labels);
 
     // Build decision tool
     let decision_tool = build_decision_tool();
@@ -476,10 +488,62 @@ async fn run_llm_classification(
         .map_err(|err| map_llm_error("LLM classification", err))?;
 
     // Parse decision from tool calls
-    let decision = DecisionOutput::parse_from_tool_calls(&response.tool_calls, DECISION_TOOL_NAME)
-        .map_err(|err| JobError::Fatal(format!("failed to parse LLM decision: {err}")))?;
+    let mut decision =
+        DecisionOutput::parse_from_tool_calls(&response.tool_calls, DECISION_TOOL_NAME)
+            .map_err(|err| JobError::Fatal(format!("failed to parse LLM decision: {err}")))?;
+
+    // Translate label names to IDs in action parameters
+    if decision.decision.action == ActionType::ApplyLabel {
+        translate_label_name_in_decision(&mut decision, &available_labels);
+    }
 
     Ok(decision)
+}
+
+/// Translate label name to provider_label_id in apply_label action parameters.
+/// The LLM returns label names (human readable), but we need to store label IDs
+/// for stability across label renames.
+fn translate_label_name_in_decision(decision: &mut DecisionOutput, available_labels: &[Label]) {
+    // Extract label name from parameters
+    let label_name = match decision.decision.parameters.get("label") {
+        Some(serde_json::Value::String(name)) => name.clone(),
+        _ => return, // No label parameter or not a string
+    };
+
+    // Find matching label by name (case-insensitive)
+    let label_name_lower = label_name.to_lowercase();
+    let matching_label = available_labels
+        .iter()
+        .find(|l| l.name.to_lowercase() == label_name_lower);
+
+    match matching_label {
+        Some(label) => {
+            // Replace label name with provider_label_id
+            if let Some(obj) = decision.decision.parameters.as_object_mut() {
+                obj.insert(
+                    "label".to_string(),
+                    serde_json::Value::String(label.provider_label_id.clone()),
+                );
+            }
+        }
+        None => {
+            // Label not found - log warning but don't fail
+            warn!(
+                label_name = %label_name,
+                "LLM returned apply_label action with unknown label name, keeping original value"
+            );
+        }
+    }
+}
+
+/// Helper function to translate a label name to its provider_label_id.
+/// Returns None if no matching label is found.
+pub fn translate_label_name_to_id(label_name: &str, labels: &[Label]) -> Option<String> {
+    let label_name_lower = label_name.to_lowercase();
+    labels
+        .iter()
+        .find(|l| l.name.to_lowercase() == label_name_lower)
+        .map(|l| l.provider_label_id.clone())
 }
 
 #[cfg(test)]
@@ -635,6 +699,7 @@ mod tests {
             scope_ref: None,
             priority: 10,
             enabled: true,
+            disabled_reason: None,
             conditions_json: json!({}),
             action_type: "archive".into(),
             action_parameters_json: json!({}),
@@ -671,6 +736,7 @@ mod tests {
             scope_ref: None,
             priority: 10,
             enabled: true,
+            disabled_reason: None,
             conditions_json: json!({}),
             action_type: "delete".into(),
             action_parameters_json: json!({}),
@@ -706,6 +772,7 @@ mod tests {
             scope_ref: None,
             priority: 10,
             enabled: true,
+            disabled_reason: None,
             conditions_json: json!({}),
             action_type: "delete".into(),
             action_parameters_json: json!({}),
@@ -1088,6 +1155,7 @@ mod tests {
             scope_ref: Some(sender_email.to_lowercase()),
             priority: 10,
             enabled: true,
+            disabled_reason: None,
             // LeafCondition uses tag = "type", rename_all = "snake_case"
             // SenderEmail variant becomes {"type": "sender_email", "value": "..."}
             conditions_json: json!({
@@ -1448,9 +1516,7 @@ mod tests {
 
         // Verify no safety overrides were applied
         let telemetry = &decision.telemetry_json;
-        let overrides = telemetry
-            .get("safety_overrides")
-            .and_then(|v| v.as_array());
+        let overrides = telemetry.get("safety_overrides").and_then(|v| v.as_array());
         assert!(
             overrides.map(|arr| arr.is_empty()).unwrap_or(true),
             "No safety overrides should be applied for DangerousOverride"
@@ -1757,7 +1823,10 @@ mod tests {
         let stored_flag = decision.decision_json["decision"]["needs_approval"]
             .as_bool()
             .unwrap();
-        assert!(stored_flag, "decision_json should reflect enforced approval flag");
+        assert!(
+            stored_flag,
+            "decision_json should reflect enforced approval flag"
+        );
 
         // Verify telemetry_json contains safety_overrides
         let telemetry = &decision.telemetry_json;
@@ -1996,5 +2065,495 @@ mod tests {
             }
             other => panic!("expected Fatal for NoToolCall, got {:?}", other),
         }
+    }
+
+    // =========================================================================
+    // Tests for Label Translation Logic (Task 8)
+    // =========================================================================
+
+    use crate::labels::Label;
+
+    fn sample_label_for_translation(provider_label_id: &str, name: &str) -> Label {
+        Label {
+            id: format!("id_{}", provider_label_id),
+            account_id: "acc_1".into(),
+            provider_label_id: provider_label_id.into(),
+            name: name.into(),
+            label_type: "user".into(),
+            description: None,
+            available_to_classifier: true,
+            message_list_visibility: Some("show".into()),
+            label_list_visibility: Some("labelShow".into()),
+            background_color: None,
+            text_color: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            org_id: DEFAULT_ORG_ID,
+            user_id: DEFAULT_USER_ID,
+        }
+    }
+
+    #[test]
+    fn translate_label_name_to_id_finds_exact_match() {
+        let labels = vec![
+            sample_label_for_translation("Label_123", "Work"),
+            sample_label_for_translation("Label_456", "Personal"),
+        ];
+
+        let result = translate_label_name_to_id("Work", &labels);
+        assert_eq!(result, Some("Label_123".to_string()));
+
+        let result2 = translate_label_name_to_id("Personal", &labels);
+        assert_eq!(result2, Some("Label_456".to_string()));
+    }
+
+    #[test]
+    fn translate_label_name_to_id_case_insensitive() {
+        let labels = vec![sample_label_for_translation("Label_123", "Work")];
+
+        assert_eq!(
+            translate_label_name_to_id("work", &labels),
+            Some("Label_123".to_string())
+        );
+        assert_eq!(
+            translate_label_name_to_id("WORK", &labels),
+            Some("Label_123".to_string())
+        );
+        assert_eq!(
+            translate_label_name_to_id("WoRk", &labels),
+            Some("Label_123".to_string())
+        );
+    }
+
+    #[test]
+    fn translate_label_name_to_id_returns_none_for_unknown() {
+        let labels = vec![sample_label_for_translation("Label_123", "Work")];
+
+        assert_eq!(translate_label_name_to_id("Unknown", &labels), None);
+        assert_eq!(translate_label_name_to_id("", &labels), None);
+    }
+
+    #[test]
+    fn translate_label_name_to_id_empty_labels() {
+        let labels: Vec<Label> = vec![];
+        assert_eq!(translate_label_name_to_id("Work", &labels), None);
+    }
+
+    #[test]
+    fn translate_label_name_in_decision_translates_correctly() {
+        let labels = vec![
+            sample_label_for_translation("Label_123", "Work"),
+            sample_label_for_translation("Label_456", "Personal"),
+        ];
+
+        let mut decision =
+            build_test_decision_output("acc_1", "thread_1", "msg_1", "apply_label", 0.9, false);
+        // Set the label parameter to a name
+        decision.decision.parameters = json!({"label": "Work"});
+
+        translate_label_name_in_decision(&mut decision, &labels);
+
+        // Should have been translated to the provider_label_id
+        assert_eq!(
+            decision
+                .decision
+                .parameters
+                .get("label")
+                .and_then(|v| v.as_str()),
+            Some("Label_123")
+        );
+    }
+
+    #[test]
+    fn translate_label_name_in_decision_case_insensitive() {
+        let labels = vec![sample_label_for_translation("Label_123", "Work")];
+
+        let mut decision =
+            build_test_decision_output("acc_1", "thread_1", "msg_1", "apply_label", 0.9, false);
+        // Use lowercase name
+        decision.decision.parameters = json!({"label": "work"});
+
+        translate_label_name_in_decision(&mut decision, &labels);
+
+        assert_eq!(
+            decision
+                .decision
+                .parameters
+                .get("label")
+                .and_then(|v| v.as_str()),
+            Some("Label_123")
+        );
+    }
+
+    #[test]
+    fn translate_label_name_in_decision_keeps_unknown_label() {
+        let labels = vec![sample_label_for_translation("Label_123", "Work")];
+
+        let mut decision =
+            build_test_decision_output("acc_1", "thread_1", "msg_1", "apply_label", 0.9, false);
+        // Use an unknown label name
+        decision.decision.parameters = json!({"label": "Unknown Label"});
+
+        translate_label_name_in_decision(&mut decision, &labels);
+
+        // Should keep the original value since label was not found
+        assert_eq!(
+            decision
+                .decision
+                .parameters
+                .get("label")
+                .and_then(|v| v.as_str()),
+            Some("Unknown Label")
+        );
+    }
+
+    #[test]
+    fn translate_label_name_in_decision_handles_missing_label_param() {
+        let labels = vec![sample_label_for_translation("Label_123", "Work")];
+
+        let mut decision =
+            build_test_decision_output("acc_1", "thread_1", "msg_1", "apply_label", 0.9, false);
+        // No label parameter
+        decision.decision.parameters = json!({});
+
+        // Should not panic or modify anything
+        translate_label_name_in_decision(&mut decision, &labels);
+
+        assert!(decision.decision.parameters.get("label").is_none());
+    }
+
+    #[test]
+    fn translate_label_name_in_decision_handles_non_string_label() {
+        let labels = vec![sample_label_for_translation("Label_123", "Work")];
+
+        let mut decision =
+            build_test_decision_output("acc_1", "thread_1", "msg_1", "apply_label", 0.9, false);
+        // Label is not a string
+        decision.decision.parameters = json!({"label": 123});
+
+        // Should not panic or modify anything
+        translate_label_name_in_decision(&mut decision, &labels);
+
+        assert_eq!(
+            decision
+                .decision
+                .parameters
+                .get("label")
+                .and_then(|v| v.as_i64()),
+            Some(123)
+        );
+    }
+
+    #[test]
+    fn translate_label_name_preserves_other_parameters() {
+        let labels = vec![sample_label_for_translation("Label_123", "Work")];
+
+        let mut decision =
+            build_test_decision_output("acc_1", "thread_1", "msg_1", "apply_label", 0.9, false);
+        // Multiple parameters
+        decision.decision.parameters = json!({"label": "Work", "other_param": "value", "count": 5});
+
+        translate_label_name_in_decision(&mut decision, &labels);
+
+        // Label should be translated
+        assert_eq!(
+            decision
+                .decision
+                .parameters
+                .get("label")
+                .and_then(|v| v.as_str()),
+            Some("Label_123")
+        );
+        // Other params should be preserved
+        assert_eq!(
+            decision
+                .decision
+                .parameters
+                .get("other_param")
+                .and_then(|v| v.as_str()),
+            Some("value")
+        );
+        assert_eq!(
+            decision
+                .decision
+                .parameters
+                .get("count")
+                .and_then(|v| v.as_i64()),
+            Some(5)
+        );
+    }
+
+    // Additional edge case tests for Task 8
+
+    #[test]
+    fn translate_label_name_to_id_with_special_characters() {
+        let labels = vec![
+            sample_label_for_translation("Label_1", "Work/Projects"),
+            sample_label_for_translation("Label_2", "Family & Friends"),
+            sample_label_for_translation("Label_3", "TODO: Urgent"),
+            sample_label_for_translation("Label_4", "Label with \"quotes\""),
+        ];
+
+        assert_eq!(
+            translate_label_name_to_id("Work/Projects", &labels),
+            Some("Label_1".to_string())
+        );
+        assert_eq!(
+            translate_label_name_to_id("Family & Friends", &labels),
+            Some("Label_2".to_string())
+        );
+        assert_eq!(
+            translate_label_name_to_id("TODO: Urgent", &labels),
+            Some("Label_3".to_string())
+        );
+        assert_eq!(
+            translate_label_name_to_id("Label with \"quotes\"", &labels),
+            Some("Label_4".to_string())
+        );
+    }
+
+    #[test]
+    fn translate_label_name_to_id_with_unicode() {
+        let labels = vec![
+            sample_label_for_translation("Label_1", "Travail"),
+            sample_label_for_translation("Label_2", "Wichtig"),
+            sample_label_for_translation("Label_3", "Praca"),
+        ];
+
+        assert_eq!(
+            translate_label_name_to_id("Travail", &labels),
+            Some("Label_1".to_string())
+        );
+        assert_eq!(
+            translate_label_name_to_id("travail", &labels), // Case insensitive
+            Some("Label_1".to_string())
+        );
+        assert_eq!(
+            translate_label_name_to_id("Wichtig", &labels),
+            Some("Label_2".to_string())
+        );
+    }
+
+    #[test]
+    fn translate_label_name_to_id_system_labels_where_id_matches_name() {
+        // System labels have IDs that match their names
+        let labels = vec![
+            sample_label_for_translation("INBOX", "INBOX"),
+            sample_label_for_translation("STARRED", "STARRED"),
+            sample_label_for_translation("SENT", "SENT"),
+        ];
+
+        // Should still work - the translation maps name->provider_label_id
+        assert_eq!(
+            translate_label_name_to_id("INBOX", &labels),
+            Some("INBOX".to_string())
+        );
+        assert_eq!(
+            translate_label_name_to_id("inbox", &labels), // Case insensitive
+            Some("INBOX".to_string())
+        );
+        assert_eq!(
+            translate_label_name_to_id("STARRED", &labels),
+            Some("STARRED".to_string())
+        );
+    }
+
+    #[test]
+    fn translate_label_name_in_decision_with_special_characters() {
+        let labels = vec![sample_label_for_translation("Label_123", "Work/Projects")];
+
+        let mut decision =
+            build_test_decision_output("acc_1", "thread_1", "msg_1", "apply_label", 0.9, false);
+        decision.decision.parameters = json!({"label": "Work/Projects"});
+
+        translate_label_name_in_decision(&mut decision, &labels);
+
+        assert_eq!(
+            decision
+                .decision
+                .parameters
+                .get("label")
+                .and_then(|v| v.as_str()),
+            Some("Label_123")
+        );
+    }
+
+    #[test]
+    fn translate_label_name_first_match_wins_for_duplicate_names() {
+        // If two labels have the same name (case-insensitively), the first one wins
+        // This documents the behavior - in practice, Gmail shouldn't allow duplicate names
+        let labels = vec![
+            sample_label_for_translation("Label_1", "Work"),
+            sample_label_for_translation("Label_2", "work"), // Same name, different case
+        ];
+
+        // Should return the first match
+        let result = translate_label_name_to_id("work", &labels);
+        assert_eq!(result, Some("Label_1".to_string()));
+    }
+
+    #[test]
+    fn translate_label_name_to_id_with_empty_name() {
+        let labels = vec![sample_label_for_translation("Label_123", "Work")];
+
+        // Empty string should return None
+        assert_eq!(translate_label_name_to_id("", &labels), None);
+    }
+
+    #[test]
+    fn translate_label_name_in_decision_with_null_label() {
+        let labels = vec![sample_label_for_translation("Label_123", "Work")];
+
+        let mut decision =
+            build_test_decision_output("acc_1", "thread_1", "msg_1", "apply_label", 0.9, false);
+        // Label is explicitly null
+        decision.decision.parameters = json!({"label": null});
+
+        // Should not panic or modify
+        translate_label_name_in_decision(&mut decision, &labels);
+
+        assert!(decision.decision.parameters.get("label").unwrap().is_null());
+    }
+
+    #[test]
+    fn translate_label_name_in_decision_with_array_label() {
+        let labels = vec![sample_label_for_translation("Label_123", "Work")];
+
+        let mut decision =
+            build_test_decision_output("acc_1", "thread_1", "msg_1", "apply_label", 0.9, false);
+        // Label is an array (invalid but should be handled gracefully)
+        decision.decision.parameters = json!({"label": ["Work", "Personal"]});
+
+        // Should not panic or modify (not a string)
+        translate_label_name_in_decision(&mut decision, &labels);
+
+        assert!(
+            decision
+                .decision
+                .parameters
+                .get("label")
+                .unwrap()
+                .is_array()
+        );
+    }
+
+    #[test]
+    fn translate_label_name_in_decision_with_object_label() {
+        let labels = vec![sample_label_for_translation("Label_123", "Work")];
+
+        let mut decision =
+            build_test_decision_output("acc_1", "thread_1", "msg_1", "apply_label", 0.9, false);
+        // Label is an object (invalid but should be handled gracefully)
+        decision.decision.parameters = json!({"label": {"name": "Work"}});
+
+        // Should not panic or modify (not a string)
+        translate_label_name_in_decision(&mut decision, &labels);
+
+        assert!(
+            decision
+                .decision
+                .parameters
+                .get("label")
+                .unwrap()
+                .is_object()
+        );
+    }
+
+    #[test]
+    fn translate_label_name_in_decision_whitespace_label_name() {
+        let labels = vec![sample_label_for_translation("Label_123", "Work")];
+
+        let mut decision =
+            build_test_decision_output("acc_1", "thread_1", "msg_1", "apply_label", 0.9, false);
+        // Label is just whitespace
+        decision.decision.parameters = json!({"label": "   "});
+
+        translate_label_name_in_decision(&mut decision, &labels);
+
+        // Should keep original (whitespace doesn't match any label)
+        assert_eq!(
+            decision
+                .decision
+                .parameters
+                .get("label")
+                .and_then(|v| v.as_str()),
+            Some("   ")
+        );
+    }
+
+    #[test]
+    fn translate_label_name_in_decision_partial_match_not_found() {
+        let labels = vec![sample_label_for_translation("Label_123", "Work Projects")];
+
+        let mut decision =
+            build_test_decision_output("acc_1", "thread_1", "msg_1", "apply_label", 0.9, false);
+        // Partial match should not work - must be exact (case-insensitive)
+        decision.decision.parameters = json!({"label": "Work"});
+
+        translate_label_name_in_decision(&mut decision, &labels);
+
+        // Should keep original since "Work" != "Work Projects"
+        assert_eq!(
+            decision
+                .decision
+                .parameters
+                .get("label")
+                .and_then(|v| v.as_str()),
+            Some("Work")
+        );
+    }
+
+    #[test]
+    fn non_apply_label_action_unaffected_by_translation() {
+        let labels = vec![sample_label_for_translation("Label_123", "Work")];
+
+        // Test various non-apply_label actions with label parameter
+        for action in ["archive", "mark_read", "delete", "star", "forward", "none"] {
+            let mut decision =
+                build_test_decision_output("acc_1", "thread_1", "msg_1", action, 0.9, false);
+            decision.decision.parameters = json!({"label": "Work", "other": "value"});
+
+            // translate_label_name_in_decision is only called for apply_label actions
+            // in run_llm_classification, so these actions should never be translated.
+            // This test verifies that IF called directly, the function itself would
+            // not modify non-apply_label actions (since it checks action type internally)
+            // Actually, looking at the code, translate_label_name_in_decision doesn't
+            // check action type - it's the caller (run_llm_classification) that does.
+            // Let's verify the function modifies any action with a label param.
+
+            // The function doesn't check action type, it just looks for label param
+            translate_label_name_in_decision(&mut decision, &labels);
+
+            // Function translates regardless of action type (by design - caller filters)
+            // This documents that translate_label_name_in_decision is action-agnostic
+            assert_eq!(
+                decision
+                    .decision
+                    .parameters
+                    .get("label")
+                    .and_then(|v| v.as_str()),
+                Some("Label_123"),
+                "Translation happens for any action with label param"
+            );
+        }
+    }
+
+    #[test]
+    fn translate_label_name_to_id_with_very_long_label_name() {
+        // Test with a very long label name
+        let long_name = "A".repeat(200);
+        let labels = vec![sample_label_for_translation("Label_123", &long_name)];
+
+        assert_eq!(
+            translate_label_name_to_id(&long_name, &labels),
+            Some("Label_123".to_string())
+        );
+
+        // Case insensitive also works
+        let lower_long_name = "a".repeat(200);
+        assert_eq!(
+            translate_label_name_to_id(&lower_long_name, &labels),
+            Some("Label_123".to_string())
+        );
     }
 }

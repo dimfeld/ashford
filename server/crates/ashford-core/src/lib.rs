@@ -5,6 +5,7 @@ pub mod db;
 pub mod decisions;
 pub mod gmail;
 pub mod jobs;
+pub mod labels;
 pub mod llm;
 pub mod messages;
 pub mod migrations;
@@ -30,9 +31,10 @@ pub use gmail::{
     TokenStore,
 };
 pub use jobs::{
-    JOB_TYPE_ACTION_GMAIL, JOB_TYPE_APPROVAL_NOTIFY, JOB_TYPE_CLASSIFY, JOB_TYPE_HISTORY_SYNC_GMAIL,
-    JOB_TYPE_INGEST_GMAIL, JobDispatcher,
+    JOB_TYPE_ACTION_GMAIL, JOB_TYPE_APPROVAL_NOTIFY, JOB_TYPE_CLASSIFY,
+    JOB_TYPE_HISTORY_SYNC_GMAIL, JOB_TYPE_INGEST_GMAIL, JobDispatcher,
 };
+pub use labels::{Label, LabelError, LabelRepository, NewLabel};
 pub use llm::{
     ChatMessage, ChatRole, CompletionRequest, CompletionResponse, GenaiLLMClient, LLMClient,
     LLMError, LlmCall, LlmCallContext, LlmCallError, LlmCallRepository, MockLLMClient, NewLlmCall,

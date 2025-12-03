@@ -31,6 +31,10 @@ static MIGRATIONS: &[Migration] = &[
         version: "005_add_llm_calls",
         sql: include_str!("../../../migrations/005_add_llm_calls.sql"),
     },
+    Migration {
+        version: "006_add_labels_table",
+        sql: include_str!("../../../migrations/006_add_labels_table.sql"),
+    },
 ];
 
 #[derive(Error, Debug)]
@@ -153,7 +157,7 @@ mod tests {
             .expect("row value")
             .get(0)
             .expect("count");
-        assert_eq!(count, 5, "migrations should only record once each");
+        assert_eq!(count, 6, "migrations should only record once each");
     }
 
     #[tokio::test]

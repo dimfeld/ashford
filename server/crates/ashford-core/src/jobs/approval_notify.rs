@@ -19,10 +19,7 @@ struct ApprovalPayload {
 /// Notify approvers that an action requires approval.
 /// This is a placeholder that currently just logs; notification fan-out will
 /// be added when the approval surface is implemented.
-pub async fn handle_approval_notify(
-    dispatcher: &JobDispatcher,
-    job: Job,
-) -> Result<(), JobError> {
+pub async fn handle_approval_notify(dispatcher: &JobDispatcher, job: Job) -> Result<(), JobError> {
     let payload: ApprovalPayload = serde_json::from_value(job.payload.clone())
         .map_err(|err| JobError::Fatal(format!("invalid approval.notify payload: {err}")))?;
 

@@ -12,7 +12,7 @@ use super::types::{
     RulesChatSession, SafeMode,
 };
 
-const DETERMINISTIC_RULE_COLUMNS: &str = "id, name, description, scope, scope_ref, priority, enabled, conditions_json, action_type, action_parameters_json, safe_mode, created_at, updated_at, org_id, user_id";
+const DETERMINISTIC_RULE_COLUMNS: &str = "id, name, description, scope, scope_ref, priority, enabled, disabled_reason, conditions_json, action_type, action_parameters_json, safe_mode, created_at, updated_at, org_id, user_id";
 const LLM_RULE_COLUMNS: &str = "id, name, description, scope, scope_ref, rule_text, enabled, metadata_json, created_at, updated_at, org_id, user_id";
 const DIRECTION_COLUMNS: &str = "id, content, enabled, created_at, updated_at, org_id, user_id";
 const RULES_CHAT_SESSION_COLUMNS: &str = "id, title, created_at, updated_at, org_id, user_id";
@@ -116,8 +116,8 @@ impl DeterministicRuleRepository {
             .query(
                 &format!(
                     "INSERT INTO deterministic_rules (
-                        id, name, description, scope, scope_ref, priority, enabled, conditions_json, action_type, action_parameters_json, safe_mode, created_at, updated_at, org_id, user_id
-                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12, ?13, ?14)
+                        id, name, description, scope, scope_ref, priority, enabled, disabled_reason, conditions_json, action_type, action_parameters_json, safe_mode, created_at, updated_at, org_id, user_id
+                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?13, ?14, ?15)
                     RETURNING {DETERMINISTIC_RULE_COLUMNS}"
                 ),
                 params![
@@ -128,6 +128,7 @@ impl DeterministicRuleRepository {
                     scope_ref,
                     new_rule.priority,
                     enabled,
+                    new_rule.disabled_reason,
                     conditions_json,
                     new_rule.action_type,
                     action_parameters_json,
@@ -280,15 +281,16 @@ impl DeterministicRuleRepository {
                          scope_ref = ?4,
                          priority = ?5,
                          enabled = ?6,
-                         conditions_json = ?7,
-                         action_type = ?8,
-                         action_parameters_json = ?9,
-                         safe_mode = ?10,
-                         user_id = ?11,
-                         updated_at = ?12
-                     WHERE id = ?13
-                       AND org_id = ?14
-                       AND (user_id IS NULL OR user_id = ?15)
+                         disabled_reason = ?7,
+                         conditions_json = ?8,
+                         action_type = ?9,
+                         action_parameters_json = ?10,
+                         safe_mode = ?11,
+                         user_id = ?12,
+                         updated_at = ?13
+                     WHERE id = ?14
+                       AND org_id = ?15
+                       AND (user_id IS NULL OR user_id = ?16)
                      RETURNING {DETERMINISTIC_RULE_COLUMNS}"
                 ),
                 params![
@@ -298,6 +300,7 @@ impl DeterministicRuleRepository {
                     scope_ref,
                     updated.priority,
                     enabled,
+                    updated.disabled_reason,
                     conditions_json,
                     updated.action_type,
                     action_parameters_json,
@@ -335,6 +338,77 @@ impl DeterministicRuleRepository {
             Some(_) => Ok(()),
             None => Err(DeterministicRuleError::NotFound(id.to_string())),
         }
+    }
+
+    /// Disable a rule and set a reason explaining why it was disabled.
+    /// This sets enabled=false and disabled_reason to the provided reason.
+    pub async fn disable_rule_with_reason(
+        &self,
+        org_id: i64,
+        user_id: i64,
+        id: &str,
+        reason: &str,
+    ) -> Result<DeterministicRule, DeterministicRuleError> {
+        let now = now_rfc3339();
+        let conn = self.db.connection().await?;
+        let mut rows = conn
+            .query(
+                &format!(
+                    "UPDATE deterministic_rules
+                     SET enabled = 0,
+                         disabled_reason = ?1,
+                         updated_at = ?2
+                     WHERE id = ?3
+                       AND org_id = ?4
+                       AND (user_id IS NULL OR user_id = ?5)
+                     RETURNING {DETERMINISTIC_RULE_COLUMNS}"
+                ),
+                params![reason, now, id, org_id, user_id],
+            )
+            .await?;
+
+        match rows.next().await? {
+            Some(row) => row_to_deterministic_rule(row),
+            None => Err(DeterministicRuleError::NotFound(id.to_string())),
+        }
+    }
+
+    /// Find rules that reference a label by provider_label_id in their conditions or action parameters.
+    /// This searches for the label ID in:
+    /// 1. LabelPresent conditions (conditions_json contains the label ID)
+    /// 2. apply_label actions (action_parameters_json contains the label ID)
+    ///
+    /// The search uses quoted JSON string matching (e.g., `"Label_1"`) to avoid false positives
+    /// where a label ID is a prefix of another (e.g., searching for "Label_1" won't match "Label_10").
+    pub async fn find_rules_referencing_label(
+        &self,
+        org_id: i64,
+        user_id: i64,
+        label_provider_id: &str,
+    ) -> Result<Vec<DeterministicRule>, DeterministicRuleError> {
+        let conn = self.db.connection().await?;
+        // Search for the label ID as a quoted JSON string value
+        // This prevents false positives like "Label_1" matching "Label_10"
+        let search_pattern = format!("%\"{}\"%", label_provider_id);
+        let mut rows = conn
+            .query(
+                &format!(
+                    "SELECT {DETERMINISTIC_RULE_COLUMNS}
+                     FROM deterministic_rules
+                     WHERE org_id = ?1
+                       AND (user_id IS NULL OR user_id = ?2)
+                       AND (conditions_json LIKE ?3 OR action_parameters_json LIKE ?3)
+                     ORDER BY priority ASC, created_at"
+                ),
+                params![org_id, user_id, search_pattern],
+            )
+            .await?;
+
+        let mut rules = Vec::new();
+        while let Some(row) = rows.next().await? {
+            rules.push(row_to_deterministic_rule(row)?);
+        }
+        Ok(rules)
     }
 }
 
@@ -945,13 +1019,14 @@ fn now_rfc3339() -> String {
 fn row_to_deterministic_rule(row: Row) -> Result<DeterministicRule, DeterministicRuleError> {
     let scope: String = row.get(3)?;
     let enabled: i64 = row.get(6)?;
-    let conditions_json: String = row.get(7)?;
-    let action_parameters_json: String = row.get(9)?;
-    let safe_mode: String = row.get(10)?;
-    let created_at: String = row.get(11)?;
-    let updated_at: String = row.get(12)?;
-    let org_id: i64 = row.get(13)?;
-    let user_id: Option<i64> = row.get(14)?;
+    let disabled_reason: Option<String> = row.get(7)?;
+    let conditions_json: String = row.get(8)?;
+    let action_parameters_json: String = row.get(10)?;
+    let safe_mode: String = row.get(11)?;
+    let created_at: String = row.get(12)?;
+    let updated_at: String = row.get(13)?;
+    let org_id: i64 = row.get(14)?;
+    let user_id: Option<i64> = row.get(15)?;
 
     let scope = RuleScope::from_str(&scope)
         .ok_or_else(|| DeterministicRuleError::InvalidScope(scope.clone()))?;
@@ -966,8 +1041,9 @@ fn row_to_deterministic_rule(row: Row) -> Result<DeterministicRule, Deterministi
         scope_ref: row.get(4)?,
         priority: row.get(5)?,
         enabled: enabled != 0,
+        disabled_reason,
         conditions_json: serde_json::from_str(&conditions_json)?,
-        action_type: row.get(8)?,
+        action_type: row.get(9)?,
         action_parameters_json: serde_json::from_str(&action_parameters_json)?,
         safe_mode,
         created_at: DateTime::parse_from_rfc3339(&created_at)?.with_timezone(&Utc),
@@ -1086,6 +1162,7 @@ mod tests {
             scope_ref: scope_ref.map(|s| s.to_string()),
             priority: 10,
             enabled: true,
+            disabled_reason: None,
             conditions_json: serde_json::json!({"all": true}),
             action_type: "flag".into(),
             action_parameters_json: serde_json::json!({"level": "high"}),
@@ -2173,5 +2250,456 @@ mod tests {
             .await
             .expect_err("should not fetch other org message");
         assert!(matches!(err, RulesChatMessageError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn disable_rule_with_reason_disables_and_sets_reason() {
+        let (db, _dir) = setup_db().await;
+        let repo = DeterministicRuleRepository::new(db);
+
+        let created = repo
+            .create(sample_new_det_rule(RuleScope::Global, None))
+            .await
+            .expect("create rule");
+
+        assert!(created.enabled);
+        assert!(created.disabled_reason.is_none());
+
+        let disabled = repo
+            .disable_rule_with_reason(
+                DEFAULT_ORG_ID,
+                DEFAULT_USER_ID,
+                &created.id,
+                "Label 'Work' was deleted from Gmail",
+            )
+            .await
+            .expect("disable rule");
+
+        assert!(!disabled.enabled);
+        assert_eq!(
+            disabled.disabled_reason.as_deref(),
+            Some("Label 'Work' was deleted from Gmail")
+        );
+        assert!(disabled.updated_at > created.updated_at);
+    }
+
+    #[tokio::test]
+    async fn disable_rule_with_reason_returns_not_found_for_nonexistent() {
+        let (db, _dir) = setup_db().await;
+        let repo = DeterministicRuleRepository::new(db);
+
+        let err = repo
+            .disable_rule_with_reason(DEFAULT_ORG_ID, DEFAULT_USER_ID, "nonexistent", "reason")
+            .await
+            .expect_err("should not find nonexistent rule");
+
+        assert!(matches!(err, DeterministicRuleError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn disable_rule_with_reason_enforces_user_scope() {
+        let (db, _dir) = setup_db().await;
+        let repo = DeterministicRuleRepository::new(db);
+
+        let mut user2_rule = sample_new_det_rule(RuleScope::Global, None);
+        user2_rule.user_id = Some(DEFAULT_USER_ID + 1);
+        let created = repo.create(user2_rule).await.expect("create rule");
+
+        // Wrong user should not be able to disable the rule
+        let err = repo
+            .disable_rule_with_reason(DEFAULT_ORG_ID, DEFAULT_USER_ID, &created.id, "reason")
+            .await
+            .expect_err("wrong user should fail");
+
+        assert!(matches!(err, DeterministicRuleError::NotFound(_)));
+
+        // Rule should still be enabled for the actual owner
+        let still_enabled = repo
+            .get_by_id(DEFAULT_ORG_ID, DEFAULT_USER_ID + 1, &created.id)
+            .await
+            .expect("fetch as owner");
+        assert!(still_enabled.enabled);
+    }
+
+    #[tokio::test]
+    async fn find_rules_referencing_label_finds_by_condition() {
+        let (db, _dir) = setup_db().await;
+        let repo = DeterministicRuleRepository::new(db);
+
+        // Create a rule with a LabelPresent condition containing the label ID
+        let mut rule_with_label = sample_new_det_rule(RuleScope::Global, None);
+        rule_with_label.conditions_json =
+            serde_json::json!({"type": "LabelPresent", "value": "Label_123"});
+        let created = repo
+            .create(rule_with_label)
+            .await
+            .expect("create rule with label");
+
+        // Create another rule without the label
+        let rule_without_label = sample_new_det_rule(RuleScope::Global, None);
+        repo.create(rule_without_label)
+            .await
+            .expect("create rule without label");
+
+        let found = repo
+            .find_rules_referencing_label(DEFAULT_ORG_ID, DEFAULT_USER_ID, "Label_123")
+            .await
+            .expect("find rules");
+
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].id, created.id);
+    }
+
+    #[tokio::test]
+    async fn find_rules_referencing_label_finds_by_action_parameters() {
+        let (db, _dir) = setup_db().await;
+        let repo = DeterministicRuleRepository::new(db);
+
+        // Create a rule with apply_label action containing the label ID
+        let mut rule_with_apply_label = sample_new_det_rule(RuleScope::Global, None);
+        rule_with_apply_label.action_type = "apply_label".to_string();
+        rule_with_apply_label.action_parameters_json = serde_json::json!({"label_id": "Label_456"});
+        let created = repo
+            .create(rule_with_apply_label)
+            .await
+            .expect("create rule with apply_label");
+
+        // Create another rule without the label
+        let rule_without_label = sample_new_det_rule(RuleScope::Global, None);
+        repo.create(rule_without_label)
+            .await
+            .expect("create rule without label");
+
+        let found = repo
+            .find_rules_referencing_label(DEFAULT_ORG_ID, DEFAULT_USER_ID, "Label_456")
+            .await
+            .expect("find rules");
+
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].id, created.id);
+    }
+
+    #[tokio::test]
+    async fn find_rules_referencing_label_finds_both_condition_and_action() {
+        let (db, _dir) = setup_db().await;
+        let repo = DeterministicRuleRepository::new(db);
+
+        // Rule 1: references label in conditions
+        let mut rule1 = sample_new_det_rule(RuleScope::Global, None);
+        rule1.conditions_json = serde_json::json!({"type": "LabelPresent", "value": "Label_789"});
+        let created1 = repo.create(rule1).await.expect("create rule1");
+
+        // Rule 2: references label in action parameters
+        let mut rule2 = sample_new_det_rule(RuleScope::Global, None);
+        rule2.action_type = "apply_label".to_string();
+        rule2.action_parameters_json = serde_json::json!({"label_id": "Label_789"});
+        let created2 = repo.create(rule2).await.expect("create rule2");
+
+        // Rule 3: references a different label
+        let mut rule3 = sample_new_det_rule(RuleScope::Global, None);
+        rule3.conditions_json = serde_json::json!({"type": "LabelPresent", "value": "INBOX"});
+        repo.create(rule3).await.expect("create rule3");
+
+        let found = repo
+            .find_rules_referencing_label(DEFAULT_ORG_ID, DEFAULT_USER_ID, "Label_789")
+            .await
+            .expect("find rules");
+
+        assert_eq!(found.len(), 2);
+        let found_ids: Vec<&str> = found.iter().map(|r| r.id.as_str()).collect();
+        assert!(found_ids.contains(&created1.id.as_str()));
+        assert!(found_ids.contains(&created2.id.as_str()));
+    }
+
+    #[tokio::test]
+    async fn find_rules_referencing_label_returns_empty_when_no_matches() {
+        let (db, _dir) = setup_db().await;
+        let repo = DeterministicRuleRepository::new(db);
+
+        // Create some rules without the label we're searching for
+        repo.create(sample_new_det_rule(RuleScope::Global, None))
+            .await
+            .expect("create rule");
+
+        let found = repo
+            .find_rules_referencing_label(DEFAULT_ORG_ID, DEFAULT_USER_ID, "NonexistentLabel")
+            .await
+            .expect("find rules");
+
+        assert!(found.is_empty());
+    }
+
+    #[tokio::test]
+    async fn find_rules_referencing_label_enforces_org_user_scope() {
+        let (db, _dir) = setup_db().await;
+        let repo = DeterministicRuleRepository::new(db);
+
+        // Create a rule for user 2 with a label reference
+        let mut rule = sample_new_det_rule(RuleScope::Global, None);
+        rule.user_id = Some(DEFAULT_USER_ID + 1);
+        rule.conditions_json = serde_json::json!({"type": "LabelPresent", "value": "Label_abc"});
+        repo.create(rule).await.expect("create rule");
+
+        // User 1 should not find user 2's rules
+        let found = repo
+            .find_rules_referencing_label(DEFAULT_ORG_ID, DEFAULT_USER_ID, "Label_abc")
+            .await
+            .expect("find rules");
+
+        assert!(found.is_empty());
+
+        // User 2 should find their own rule
+        let found = repo
+            .find_rules_referencing_label(DEFAULT_ORG_ID, DEFAULT_USER_ID + 1, "Label_abc")
+            .await
+            .expect("find rules");
+
+        assert_eq!(found.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn find_rules_referencing_label_does_not_match_prefix() {
+        let (db, _dir) = setup_db().await;
+        let repo = DeterministicRuleRepository::new(db);
+
+        // Create a rule with "Label_1" - this should NOT be found when searching for "Label_1"
+        // if we're searching for "Label_10"
+        let mut rule_label_1 = sample_new_det_rule(RuleScope::Global, None);
+        rule_label_1.conditions_json =
+            serde_json::json!({"type": "LabelPresent", "value": "Label_1"});
+        let created_label_1 = repo
+            .create(rule_label_1)
+            .await
+            .expect("create rule with Label_1");
+
+        // Create a rule with "Label_10" - this should be found when searching for "Label_10"
+        let mut rule_label_10 = sample_new_det_rule(RuleScope::Global, None);
+        rule_label_10.conditions_json =
+            serde_json::json!({"type": "LabelPresent", "value": "Label_10"});
+        let created_label_10 = repo
+            .create(rule_label_10)
+            .await
+            .expect("create rule with Label_10");
+
+        // Create a rule with "Label_123" - this should NOT be found when searching for "Label_1"
+        let mut rule_label_123 = sample_new_det_rule(RuleScope::Global, None);
+        rule_label_123.action_type = "apply_label".to_string();
+        rule_label_123.action_parameters_json = serde_json::json!({"label_id": "Label_123"});
+        repo.create(rule_label_123)
+            .await
+            .expect("create rule with Label_123");
+
+        // Searching for "Label_1" should only find the rule with exactly "Label_1"
+        let found_label_1 = repo
+            .find_rules_referencing_label(DEFAULT_ORG_ID, DEFAULT_USER_ID, "Label_1")
+            .await
+            .expect("find rules for Label_1");
+
+        assert_eq!(
+            found_label_1.len(),
+            1,
+            "Should find exactly 1 rule for Label_1, not rules with Label_10 or Label_123"
+        );
+        assert_eq!(found_label_1[0].id, created_label_1.id);
+
+        // Searching for "Label_10" should only find the rule with exactly "Label_10"
+        let found_label_10 = repo
+            .find_rules_referencing_label(DEFAULT_ORG_ID, DEFAULT_USER_ID, "Label_10")
+            .await
+            .expect("find rules for Label_10");
+
+        assert_eq!(
+            found_label_10.len(),
+            1,
+            "Should find exactly 1 rule for Label_10"
+        );
+        assert_eq!(found_label_10[0].id, created_label_10.id);
+    }
+
+    #[tokio::test]
+    async fn deterministic_rule_disabled_reason_is_stored_on_create() {
+        let (db, _dir) = setup_db().await;
+        let repo = DeterministicRuleRepository::new(db);
+
+        let mut rule = sample_new_det_rule(RuleScope::Global, None);
+        rule.enabled = false;
+        rule.disabled_reason = Some("Pre-disabled for testing".to_string());
+
+        let created = repo.create(rule).await.expect("create rule");
+
+        assert!(!created.enabled);
+        assert_eq!(
+            created.disabled_reason.as_deref(),
+            Some("Pre-disabled for testing")
+        );
+    }
+
+    #[tokio::test]
+    async fn deterministic_rule_disabled_reason_is_updated() {
+        let (db, _dir) = setup_db().await;
+        let repo = DeterministicRuleRepository::new(db);
+
+        let created = repo
+            .create(sample_new_det_rule(RuleScope::Global, None))
+            .await
+            .expect("create rule");
+
+        assert!(created.disabled_reason.is_none());
+
+        let mut updated_rule = sample_new_det_rule(RuleScope::Global, None);
+        updated_rule.enabled = false;
+        updated_rule.disabled_reason = Some("Label deleted".to_string());
+
+        let updated = repo
+            .update(DEFAULT_ORG_ID, DEFAULT_USER_ID, &created.id, updated_rule)
+            .await
+            .expect("update rule");
+
+        assert!(!updated.enabled);
+        assert_eq!(updated.disabled_reason.as_deref(), Some("Label deleted"));
+    }
+
+    #[tokio::test]
+    async fn disabled_reason_can_be_cleared_via_update() {
+        let (db, _dir) = setup_db().await;
+        let repo = DeterministicRuleRepository::new(db);
+
+        // Create rule with disabled_reason
+        let mut rule = sample_new_det_rule(RuleScope::Global, None);
+        rule.enabled = false;
+        rule.disabled_reason = Some("Initially disabled".to_string());
+
+        let created = repo.create(rule).await.expect("create rule");
+        assert_eq!(
+            created.disabled_reason.as_deref(),
+            Some("Initially disabled")
+        );
+
+        // Re-enable and clear disabled_reason via update
+        let mut updated_rule = sample_new_det_rule(RuleScope::Global, None);
+        updated_rule.enabled = true;
+        updated_rule.disabled_reason = None;
+
+        let updated = repo
+            .update(DEFAULT_ORG_ID, DEFAULT_USER_ID, &created.id, updated_rule)
+            .await
+            .expect("update rule");
+
+        assert!(updated.enabled);
+        assert!(updated.disabled_reason.is_none());
+    }
+
+    #[tokio::test]
+    async fn find_rules_referencing_label_matches_exact_label_id() {
+        let (db, _dir) = setup_db().await;
+        let repo = DeterministicRuleRepository::new(db);
+
+        // Create rules with distinct label IDs
+        let mut rule_abc = sample_new_det_rule(RuleScope::Global, None);
+        rule_abc.conditions_json =
+            serde_json::json!({"type": "LabelPresent", "value": "Label_ABC"});
+        repo.create(rule_abc).await.expect("create rule abc");
+
+        let mut rule_xyz = sample_new_det_rule(RuleScope::Global, None);
+        rule_xyz.conditions_json =
+            serde_json::json!({"type": "LabelPresent", "value": "Label_XYZ"});
+        repo.create(rule_xyz).await.expect("create rule xyz");
+
+        // Search with exact label ID - should find only the matching rule
+        let found_abc = repo
+            .find_rules_referencing_label(DEFAULT_ORG_ID, DEFAULT_USER_ID, "Label_ABC")
+            .await
+            .expect("find abc");
+        assert_eq!(found_abc.len(), 1);
+        assert!(
+            found_abc[0]
+                .conditions_json
+                .to_string()
+                .contains("Label_ABC")
+        );
+
+        let found_xyz = repo
+            .find_rules_referencing_label(DEFAULT_ORG_ID, DEFAULT_USER_ID, "Label_XYZ")
+            .await
+            .expect("find xyz");
+        assert_eq!(found_xyz.len(), 1);
+        assert!(
+            found_xyz[0]
+                .conditions_json
+                .to_string()
+                .contains("Label_XYZ")
+        );
+
+        // Note: SQLite LIKE is case-insensitive by default. This test documents
+        // the current behavior: searching "label_abc" will match "Label_ABC".
+        // Gmail label IDs in practice use consistent casing, so this should
+        // not cause issues in production usage.
+        let found_lower = repo
+            .find_rules_referencing_label(DEFAULT_ORG_ID, DEFAULT_USER_ID, "label_abc")
+            .await
+            .expect("find lowercase");
+        // SQLite LIKE is case-insensitive, so this will find the rule
+        assert_eq!(found_lower.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn find_rules_referencing_label_no_partial_matches() {
+        let (db, _dir) = setup_db().await;
+        let repo = DeterministicRuleRepository::new(db);
+
+        // This test verifies that the search uses quoted JSON matching to avoid false positives.
+        // Searching for "Label_1" should NOT match "Label_10", "Label_123", etc.
+
+        let mut rule1 = sample_new_det_rule(RuleScope::Global, None);
+        rule1.conditions_json = serde_json::json!({"type": "LabelPresent", "value": "Label_1"});
+        let created1 = repo.create(rule1).await.expect("create rule1");
+
+        let mut rule2 = sample_new_det_rule(RuleScope::Global, None);
+        rule2.conditions_json = serde_json::json!({"type": "LabelPresent", "value": "Label_10"});
+        repo.create(rule2).await.expect("create rule2");
+
+        let mut rule3 = sample_new_det_rule(RuleScope::Global, None);
+        rule3.conditions_json = serde_json::json!({"type": "LabelPresent", "value": "Label_123"});
+        repo.create(rule3).await.expect("create rule3");
+
+        // Searching for "Label_1" should only find rule1 with exactly "Label_1"
+        // It should NOT find rules with "Label_10" or "Label_123"
+        let found = repo
+            .find_rules_referencing_label(DEFAULT_ORG_ID, DEFAULT_USER_ID, "Label_1")
+            .await
+            .expect("find rules");
+
+        // Only the exact match should be found
+        assert_eq!(
+            found.len(),
+            1,
+            "Should only find exact matches, not prefix matches"
+        );
+        assert_eq!(found[0].id, created1.id);
+    }
+
+    #[tokio::test]
+    async fn find_rules_referencing_label_nested_condition() {
+        let (db, _dir) = setup_db().await;
+        let repo = DeterministicRuleRepository::new(db);
+
+        // Create a rule with a nested condition structure containing the label
+        let mut rule = sample_new_det_rule(RuleScope::Global, None);
+        rule.conditions_json = serde_json::json!({
+            "type": "And",
+            "children": [
+                {"type": "LabelPresent", "value": "Label_NESTED"},
+                {"type": "SenderEmail", "value": "test@example.com"}
+            ]
+        });
+        let created = repo.create(rule).await.expect("create rule");
+
+        let found = repo
+            .find_rules_referencing_label(DEFAULT_ORG_ID, DEFAULT_USER_ID, "Label_NESTED")
+            .await
+            .expect("find rules");
+
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].id, created.id);
     }
 }
