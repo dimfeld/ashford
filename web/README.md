@@ -1,38 +1,99 @@
-# sv
+# Ashford Web UI
 
-Everything you need to build a Svelte project, powered by [`sv`](https://github.com/sveltejs/cli).
+SvelteKit-based web interface for managing Ashford email automation.
 
-## Creating a project
+## Features
 
-If you're seeing this, you've probably already done this step. Congrats!
+- **Actions History** - View and filter historical email actions
+- **Rules Management** - Create and manage deterministic and LLM rules
+- **Rules Assistant** - Natural language interface for rule creation
+- **Settings** - View system configuration
+- **Dark Mode** - Toggle between light and dark themes
 
-```sh
-# create a new project in the current directory
-npx sv create
+## Getting Started
 
-# create a new project in my-app
-npx sv create my-app
+### Prerequisites
+
+- Node.js 20+
+- pnpm
+
+### Development
+
+```bash
+# Install dependencies
+pnpm install
+
+# Start development server
+pnpm dev
+
+# Open in browser
+open http://localhost:5173
 ```
 
-## Developing
+### Environment Variables
 
-Once you've created a project and installed dependencies with `npm install` (or `pnpm install` or `yarn`), start a development server:
+| Variable      | Description          | Default                  |
+| ------------- | -------------------- | ------------------------ |
+| `BACKEND_URL` | Rust backend API URL | `http://127.0.0.1:17800` |
 
-```sh
-npm run dev
+### Building
 
-# or start the server and open the app in a new browser tab
-npm run dev -- --open
+```bash
+# Create production build
+pnpm build
+
+# Preview production build
+pnpm preview
 ```
 
-## Building
+## Project Structure
 
-To create a production version of your app:
-
-```sh
-npm run build
+```
+src/
+├── routes/              # SvelteKit pages and layouts
+│   ├── +layout.svelte   # App shell with sidebar navigation
+│   ├── actions/         # Actions history pages
+│   ├── rules/           # Rules management pages
+│   └── settings/        # Settings page
+├── lib/
+│   ├── api/             # API client and remote functions
+│   │   ├── client.ts    # Typed fetch wrapper for backend API
+│   │   └── *.remote.ts  # Remote function definitions
+│   ├── components/
+│   │   └── ui/          # shadcn-svelte UI components
+│   └── types/
+│       └── generated/   # TypeScript types from Rust (ts-rs)
 ```
 
-You can preview the production build with `npm run preview`.
+## TypeScript Types
 
-> To deploy your app, you may need to install an [adapter](https://svelte.dev/docs/kit/adapters) for your target environment.
+Types are auto-generated from Rust using `ts-rs`. To regenerate after Rust type changes:
+
+```bash
+cd ../server
+cargo test --test export_ts_types -- --ignored
+```
+
+Generated types include:
+
+- `Action`, `ActionStatus`, `Decision`, `DecisionSource`
+- `DeterministicRule`, `LlmRule`, `Condition`
+- `AccountSummary`, `MessageSummary`, `LabelSummary`
+- `PaginatedResponse<T>`
+
+## Remote Functions
+
+Remote functions in `*.remote.ts` files provide type-safe client-server communication. They execute on the server but can be called from client code.
+
+```typescript
+// lib/api/example.remote.ts
+import { query, command } from '$app/server';
+import * as v from 'valibot';
+import { get } from './client';
+
+export const getActions = query(v.object({ status: v.optional(v.string()) }), async (input) => {
+	return get('/api/actions');
+});
+```
+
+See `docs/svelte_remote_functions.md` and `src/lib/api/example.remote.ts` for full documentation and examples.

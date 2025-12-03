@@ -3,6 +3,7 @@ use libsql::{Row, params};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
+use ts_rs::TS;
 use uuid::Uuid;
 
 use crate::db::{Database, DbError};
@@ -10,7 +11,8 @@ use crate::gmail::types::Header;
 
 const MESSAGE_COLUMNS: &str = "id, account_id, thread_id, provider_message_id, from_email, from_name, to_json, cc_json, bcc_json, subject, snippet, received_at, internal_date, labels_json, headers_json, body_plain, body_html, raw_json, created_at, updated_at, org_id, user_id";
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
 pub struct Mailbox {
     pub email: String,
     pub name: Option<String>,

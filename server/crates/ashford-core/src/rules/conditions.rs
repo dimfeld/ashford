@@ -4,11 +4,13 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
+use ts_rs::TS;
 
 use crate::messages::Message;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
+#[ts(export)]
 pub enum LogicalOperator {
     #[serde(alias = "AND")]
     And,
@@ -18,14 +20,18 @@ pub enum LogicalOperator {
     Not,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
 pub struct LogicalCondition {
     pub op: LogicalOperator,
+    /// In TypeScript, Condition = LogicalCondition | LeafCondition
+    #[ts(type = "Array<LogicalCondition | LeafCondition>")]
     pub children: Vec<Condition>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[ts(export)]
 pub enum LeafCondition {
     SenderEmail { value: String },
     SenderDomain { value: String },
@@ -35,6 +41,11 @@ pub enum LeafCondition {
     LabelPresent { value: String },
 }
 
+/// A condition that can be either a logical operation (AND/OR/NOT) or a leaf condition.
+/// In TypeScript, this is represented as `LogicalCondition | LeafCondition`.
+///
+/// Note: We don't derive TS for this untagged enum as ts-rs doesn't handle #[serde(untagged)] well.
+/// The Condition type alias will be manually created in the generated types.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum Condition {

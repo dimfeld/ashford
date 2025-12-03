@@ -1,9 +1,11 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use ts_rs::TS;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
+#[ts(export)]
 pub enum RuleScope {
     Global,
     Account,
@@ -32,8 +34,9 @@ impl RuleScope {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
+#[ts(export)]
 pub enum SafeMode {
     Default,
     AlwaysSafe,
@@ -86,20 +89,26 @@ impl RulesChatRole {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
 pub struct DeterministicRule {
     pub id: String,
+    #[ts(type = "number")]
     pub org_id: i64,
+    #[ts(type = "number | null")]
     pub user_id: Option<i64>,
     pub name: String,
     pub description: Option<String>,
     pub scope: RuleScope,
     pub scope_ref: Option<String>,
+    #[ts(type = "number")]
     pub priority: i64,
     pub enabled: bool,
     pub disabled_reason: Option<String>,
+    #[ts(type = "Record<string, unknown>")]
     pub conditions_json: Value,
     pub action_type: String,
+    #[ts(type = "Record<string, unknown>")]
     pub action_parameters_json: Value,
     pub safe_mode: SafeMode,
     pub created_at: DateTime<Utc>,
@@ -123,10 +132,13 @@ pub struct NewDeterministicRule {
     pub safe_mode: SafeMode,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
 pub struct LlmRule {
     pub id: String,
+    #[ts(type = "number")]
     pub org_id: i64,
+    #[ts(type = "number | null")]
     pub user_id: Option<i64>,
     pub name: String,
     pub description: Option<String>,
@@ -134,6 +146,7 @@ pub struct LlmRule {
     pub scope_ref: Option<String>,
     pub rule_text: String,
     pub enabled: bool,
+    #[ts(type = "Record<string, unknown>")]
     pub metadata_json: Value,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,

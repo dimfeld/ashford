@@ -1,4 +1,5 @@
 pub mod accounts;
+pub mod api;
 pub mod config;
 pub mod constants;
 pub mod db;
@@ -17,7 +18,10 @@ pub mod telemetry;
 pub mod threads;
 pub mod worker;
 
-pub use accounts::{Account, AccountConfig, AccountRepository, AccountState, PubsubConfig};
+pub use accounts::{
+    Account, AccountConfig, AccountRepository, AccountState, PubsubConfig, SyncStatus,
+};
+pub use api::{AccountSummary, LabelColors, LabelSummary, MessageSummary, PaginatedResponse};
 pub use config::{Config, PolicyConfig};
 pub use constants::{DEFAULT_ORG_ID, DEFAULT_USER_ID};
 pub use db::Database;

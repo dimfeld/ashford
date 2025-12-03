@@ -2,6 +2,7 @@ use chrono::{DateTime, Duration, SecondsFormat, Utc};
 use libsql::{Row, params};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use ts_rs::TS;
 use uuid::Uuid;
 
 use crate::db::{Database, DbError};
@@ -40,8 +41,9 @@ pub struct AccountConfig {
 }
 
 /// Tracks the synchronization status for an account.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default, TS)]
 #[serde(rename_all = "snake_case")]
+#[ts(export)]
 pub enum SyncStatus {
     /// Normal operation - history sync is working
     #[default]
@@ -52,7 +54,8 @@ pub enum SyncStatus {
     Backfilling,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default, TS)]
+#[ts(export)]
 pub struct AccountState {
     pub history_id: Option<String>,
     pub last_sync_at: Option<DateTime<Utc>>,

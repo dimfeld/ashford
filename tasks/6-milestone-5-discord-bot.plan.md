@@ -9,12 +9,10 @@ status: pending
 priority: high
 container: false
 temp: false
-dependencies:
-  - 5
+dependencies: []
 parent: 1
 references:
   "1": 076d03b1-833c-4982-b0ca-1d8868d40e31
-  "5": 66785b19-e85d-4135-bbca-9d061a0394c7
 issue: []
 pullRequest: []
 docs:

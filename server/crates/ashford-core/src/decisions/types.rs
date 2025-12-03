@@ -1,9 +1,11 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use ts_rs::TS;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
+#[ts(export)]
 pub enum DecisionSource {
     Llm,
     Deterministic,
@@ -26,8 +28,9 @@ impl DecisionSource {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
+#[ts(export)]
 pub enum ActionStatus {
     Queued,
     Executing,
@@ -65,8 +68,9 @@ impl ActionStatus {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
+#[ts(export)]
 pub enum ActionLinkRelationType {
     UndoOf,
     ApprovalFor,
@@ -95,19 +99,24 @@ impl ActionLinkRelationType {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
 pub struct Decision {
     pub id: String,
+    #[ts(type = "number")]
     pub org_id: i64,
+    #[ts(type = "number")]
     pub user_id: i64,
     pub account_id: String,
     pub message_id: String,
     pub source: DecisionSource,
+    #[ts(type = "Record<string, unknown>")]
     pub decision_json: Value,
     pub action_type: Option<String>,
     pub confidence: Option<f64>,
     pub needs_approval: bool,
     pub rationale: Option<String>,
+    #[ts(type = "Record<string, unknown>")]
     pub telemetry_json: Value,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -128,19 +137,24 @@ pub struct NewDecision {
     pub telemetry_json: Value,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
 pub struct Action {
     pub id: String,
+    #[ts(type = "number")]
     pub org_id: i64,
+    #[ts(type = "number")]
     pub user_id: i64,
     pub account_id: String,
     pub message_id: String,
     pub decision_id: Option<String>,
     pub action_type: String,
+    #[ts(type = "Record<string, unknown>")]
     pub parameters_json: Value,
     pub status: ActionStatus,
     pub error_message: Option<String>,
     pub executed_at: Option<DateTime<Utc>>,
+    #[ts(type = "Record<string, unknown>")]
     pub undo_hint_json: Value,
     pub trace_id: Option<String>,
     pub created_at: DateTime<Utc>,
@@ -163,7 +177,8 @@ pub struct NewAction {
     pub trace_id: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
 pub struct ActionLink {
     pub id: String,
     pub cause_action_id: String,

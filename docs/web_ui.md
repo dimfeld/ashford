@@ -4,11 +4,49 @@ The web UI is built with SvelteKit and provides a user interface for viewing and
 
 ## Architecture
 
+### TypeScript Types
+
+TypeScript types are automatically generated from Rust types using `ts-rs`. The generated types live in `web/src/lib/types/generated/` and include:
+
+- **Action types**: `Action`, `ActionStatus`, `ActionLink`, `ActionLinkRelationType`
+- **Decision types**: `Decision`, `DecisionSource`
+- **Rule types**: `DeterministicRule`, `LlmRule`, `RuleScope`, `SafeMode`, `Condition`
+- **Summary types**: `AccountSummary`, `LabelSummary`, `MessageSummary` (optimized for API responses)
+- **Pagination**: `PaginatedResponse<T>` generic wrapper
+
+To regenerate types after changing Rust types:
+
+```bash
+cd server
+cargo test --test export_ts_types -- --ignored
+```
+
+### API Client
+
+The API client (`web/src/lib/api/client.ts`) provides typed fetch helpers for communicating with the Rust backend:
+
+- `get<T>(path, options?)` - GET requests
+- `post<T>(path, body?, options?)` - POST requests
+- `patch<T>(path, body?, options?)` - PATCH requests
+- `put<T>(path, body?, options?)` - PUT requests
+- `del<T>(path, options?)` - DELETE requests
+- `buildQueryString(params)` - Builds query strings from objects
+
+The client includes:
+- Automatic JSON serialization/deserialization
+- Error handling with `ApiError` class (includes status code and response body)
+- Configurable timeout (default 30s)
+- Support for custom abort signals
+
+Configure the backend URL via the `BACKEND_URL` environment variable (defaults to `http://127.0.0.1:17800`).
+
+### Remote Functions Pattern
+
 The SvelteKit application uses a **remote functions** pattern where:
 
 1. **Frontend Components** (Svelte pages/components) call **SvelteKit remote functions**
 2. **Remote Functions** (server-side TypeScript in `+page.server.ts` or `+server.ts` files) communicate with the **Rust backend API**
-3. **Rust Backend** exposes REST endpoints on `http://127.0.0.1:17801`
+3. **Rust Backend** exposes REST endpoints on `http://127.0.0.1:17800`
 
 ```
 ┌─────────────────┐
@@ -25,7 +63,7 @@ The SvelteKit application uses a **remote functions** pattern where:
          ▼
 ┌─────────────────┐
 │ Rust Backend    │
-│ :17801          │
+│ :17800          │
 └─────────────────┘
 ```
 
@@ -150,7 +188,7 @@ SvelteKit remote functions are implemented as:
 - **Form actions** in `+page.server.ts` files (for mutations)
 - **API routes** in `+server.ts` files (for programmatic endpoints)
 
-All remote functions make HTTP requests to the Rust backend API at `http://127.0.0.1:17801`.
+All remote functions make HTTP requests to the Rust backend API at `http://127.0.0.1:17800` using the API client from `$lib/api/client.ts`.
 
 ### Streaming Responses
 
@@ -171,6 +209,8 @@ For non-streaming updates (e.g., action history, rule changes), use simple perio
 // lib/queries.remote.ts
 import { query } from '$app/server';
 import * as v from 'valibot';
+import { get, buildQueryString } from '$lib/api/client';
+import type { PaginatedResponse, Action } from '$lib/types/generated';
 
 export const getActions = query(
   v.object({
@@ -178,11 +218,9 @@ export const getActions = query(
     account: v.optional(v.string()),
     // ... other filter parameters
   }),
-  async (filters) => {
-    const response = await fetch(
-      'http://127.0.0.1:17801/api/actions?' + new URLSearchParams(filters).toString()
-    );
-    return await response.json();
+  async (filters): Promise<PaginatedResponse<Action>> => {
+    const queryString = buildQueryString(filters);
+    return get<PaginatedResponse<Action>>(`/api/actions${queryString}`);
   }
 );
 ```
@@ -225,10 +263,14 @@ For real-time streaming (LLM responses), use the SSE pattern described above.
 
 ### Example: Query Remote Function
 
+See `$lib/api/example.remote.ts` for complete working examples.
+
 ```typescript
 // lib/actions.remote.ts
 import { query } from '$app/server';
 import * as v from 'valibot';
+import { get, buildQueryString } from '$lib/api/client';
+import type { Action, PaginatedResponse } from '$lib/types/generated';
 
 // Define a query for fetching actions
 export const getActions = query(
@@ -239,33 +281,19 @@ export const getActions = query(
     actionType: v.optional(v.string()),
     status: v.optional(v.string()),
   }),
-  async (filters) => {
-    const params = new URLSearchParams(
-      Object.entries(filters).filter(([_, v]) => v !== undefined)
-    );
-
-    const response = await fetch(
-      `http://127.0.0.1:17801/api/actions?${params}`
-    );
-
-    if (!response.ok) {
-      throw new Error('Failed to fetch actions');
-    }
-
-    return await response.json();
+  async (filters): Promise<PaginatedResponse<Action>> => {
+    const queryString = buildQueryString(filters);
+    return get<PaginatedResponse<Action>>(`/api/actions${queryString}`);
   }
 );
 
 // Define a query for fetching a single action
-export const getAction = query(v.string(), async (id) => {
-  const response = await fetch(`http://127.0.0.1:17801/api/actions/${id}`);
-
-  if (!response.ok) {
-    throw new Error('Failed to fetch action');
+export const getAction = query(
+  v.object({ id: v.string() }),
+  async (input): Promise<Action> => {
+    return get<Action>(`/api/actions/${input.id}`);
   }
-
-  return await response.json();
-});
+);
 ```
 
 ```svelte
@@ -296,23 +324,25 @@ export const getAction = query(v.string(), async (id) => {
 ```typescript
 // lib/actions.remote.ts (continued)
 import { command } from '$app/server';
+import { post } from '$lib/api/client';
 
 // Define a command for undoing an action
-export const undoAction = command(v.string(), async (id) => {
-  const response = await fetch(
-    `http://127.0.0.1:17801/api/actions/${id}/undo`,
-    { method: 'POST' }
-  );
+export const undoAction = command(
+  v.object({
+    actionId: v.string(),
+    reason: v.optional(v.string())
+  }),
+  async (input) => {
+    const result = await post(`/api/actions/${input.actionId}/undo`, {
+      reason: input.reason
+    });
 
-  if (!response.ok) {
-    throw new Error(await response.text());
+    // Refresh the action detail after undo
+    getAction({ id: input.actionId }).refresh();
+
+    return result;
   }
-
-  // Refresh the action detail after undo
-  getAction(id).refresh();
-
-  return await response.json();
-});
+);
 ```
 
 ```svelte
@@ -321,12 +351,12 @@ export const undoAction = command(v.string(), async (id) => {
   import { getAction, undoAction } from '$lib/actions.remote';
   import { page } from '$app/state';
 
-  $: actionId = $page.params.id;
-  $: result = getAction(actionId);
+  let actionId = $derived(page.params.id);
+  let result = await getAction({ id: actionId });
 
   async function handleUndo() {
     try {
-      await undoAction(actionId);
+      await undoAction({ actionId });
       // getAction automatically refreshes due to the .refresh() call in undoAction
     } catch (error) {
       console.error('Undo failed:', error);
@@ -334,8 +364,8 @@ export const undoAction = command(v.string(), async (id) => {
   }
 </script>
 
-{#if result.data}
-  <ActionDetail action={result.data} />
+{#if result}
+  <ActionDetail action={result} />
   <button onclick={handleUndo}>Undo Action</button>
 {/if}
 ```
@@ -350,7 +380,7 @@ export const POST: RequestHandler = async ({ request, fetch }) => {
   const { message, conversationId } = await request.json();
 
   // Open SSE connection to Rust backend
-  const response = await fetch('http://127.0.0.1:17801/api/rules/assistant/stream', {
+  const response = await fetch('http://127.0.0.1:17800/api/rules/assistant/stream', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ message, conversationId })
@@ -394,7 +424,7 @@ export const POST: RequestHandler = async ({ request, fetch }) => {
 
 ## Rust Backend API Endpoints
 
-The Rust backend exposes the following REST endpoints on `http://127.0.0.1:17801`:
+The Rust backend exposes the following REST endpoints on `http://127.0.0.1:17800`:
 
 ### Actions
 - `GET /api/actions` - List actions with optional filters

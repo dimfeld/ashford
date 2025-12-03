@@ -1,0 +1,2 @@
+# ts-rs generated bindings (we export to web/src/lib/types/generated instead)
+bindings/
