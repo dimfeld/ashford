@@ -15,7 +15,9 @@ dependencies:
   - 23
   - 24
   - 22
-  - 30
+  - 27
+  - 26
+  - 31
 parent: 1
 references:
   "1": 076d03b1-833c-4982-b0ca-1d8868d40e31
@@ -24,7 +26,9 @@ references:
   "23": 7300ce7b-c38b-4fe6-ae96-ead50a3f1f05
   "24": e3c7d618-82e3-4835-9f9c-441d596c2fc1
   "25": 0402f4e3-9063-4655-b42d-cef6910a6827
-  "30": f66cf496-965b-4654-9fec-81593d25e48d
+  "26": f66cf496-965b-4654-9fec-81593d25e48d
+  "27": 18da2db8-7523-467d-9f54-5f8a73896df7
+  "31": cc4bd313-ff47-4c58-87f2-30999a6058e2
 issue: []
 pullRequest: []
 docs:
@@ -33,7 +37,7 @@ docs:
 planGeneratedAt: 2025-11-29T01:23:12.234Z
 promptsGeneratedAt: 2025-11-29T01:23:12.234Z
 createdAt: 2025-11-29T01:21:26.875Z
-updatedAt: 2025-12-04T10:11:21.641Z
+updatedAt: 2025-12-04T20:29:59.384Z
 progressNotes: []
 tasks:
   - title: Define action types enum
