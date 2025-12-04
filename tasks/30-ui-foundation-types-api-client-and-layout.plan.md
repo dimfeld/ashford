@@ -3,7 +3,7 @@
 title: "UI Foundation: Types, API Client, and Layout"
 goal: Set up the foundational infrastructure for the SvelteKit UI including
   TypeScript types, API client utilities, and app layout with sidebar navigation
-id: 26
+id: 30
 uuid: 64c00252-4c84-4b02-8fc2-68559edf27a9
 generatedBy: agent
 status: done
@@ -12,7 +12,8 @@ container: false
 temp: false
 dependencies: []
 parent: 7
-references: {}
+references:
+  "7": 5a952985-9ed4-4035-8fef-479f3f7e2010
 issue: []
 pullRequest: []
 docs:
