@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use chrono::{DateTime, Duration, Utc};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tracing::info;
@@ -8,11 +9,15 @@ use crate::accounts::AccountRepository;
 use crate::constants::{DEFAULT_ORG_ID, DEFAULT_USER_ID};
 use crate::decisions::{Action, ActionRepository, ActionStatus};
 use crate::gmail::{GmailClient, GmailClientError, NoopTokenStore};
+use crate::labels::{LabelError, LabelRepository, NewLabel};
 use crate::llm::decision::ActionType;
 use crate::messages::{Message, MessageRepository};
+use crate::queue::{JobQueue, QueueError};
 use crate::{Job, JobError};
 
-use super::{JobDispatcher, map_account_error, map_action_error, map_gmail_error};
+use super::{
+    JOB_TYPE_UNSNOOZE_GMAIL, JobDispatcher, map_account_error, map_action_error, map_gmail_error,
+};
 
 pub const JOB_TYPE: &str = "action.gmail";
 
@@ -119,6 +124,210 @@ impl PreImageState {
             "inverse_parameters": inverse_parameters
         })
     }
+}
+
+fn parse_snooze_until(parameters: &Value) -> Result<DateTime<Utc>, GmailClientError> {
+    let now = Utc::now();
+    let has_until = parameters.get("until").is_some();
+    let has_amount = parameters.get("amount").is_some();
+    let has_units = parameters.get("units").is_some();
+
+    if has_until && (has_amount || has_units) {
+        return Err(GmailClientError::InvalidParameter(
+            "provide either 'until' or 'amount'/'units', not both".to_string(),
+        ));
+    }
+
+    if has_until {
+        let until_str = parameters["until"].as_str().ok_or_else(|| {
+            GmailClientError::InvalidParameter(
+                "'until' must be an ISO8601 datetime string".to_string(),
+            )
+        })?;
+
+        let until = DateTime::parse_from_rfc3339(until_str)
+            .map_err(|_| {
+                GmailClientError::InvalidParameter(
+                    "unable to parse 'until' as RFC3339 datetime".to_string(),
+                )
+            })?
+            .with_timezone(&Utc);
+
+        if until <= now {
+            return Err(GmailClientError::InvalidParameter(
+                "snooze time must be in the future".to_string(),
+            ));
+        }
+
+        if until - now > Duration::days(365) {
+            return Err(GmailClientError::InvalidParameter(
+                "snooze duration exceeds maximum of 1 year".to_string(),
+            ));
+        }
+
+        return Ok(until);
+    }
+
+    if has_amount || has_units {
+        let amount = parameters["amount"].as_i64().ok_or_else(|| {
+            GmailClientError::InvalidParameter(
+                "'amount' must be a positive integer when using duration format".to_string(),
+            )
+        })?;
+
+        if amount <= 0 {
+            return Err(GmailClientError::InvalidParameter(
+                "'amount' must be greater than zero".to_string(),
+            ));
+        }
+
+        let units = parameters["units"].as_str().ok_or_else(|| {
+            GmailClientError::InvalidParameter(
+                "'units' must be one of minutes|hours|days".to_string(),
+            )
+        })?;
+
+        let duration = match units {
+            "minutes" => Duration::minutes(amount),
+            "hours" => Duration::hours(amount),
+            "days" => Duration::days(amount),
+            other => {
+                return Err(GmailClientError::InvalidParameter(format!(
+                    "unsupported units '{other}', use minutes|hours|days"
+                )));
+            }
+        };
+
+        if duration > Duration::days(365) {
+            return Err(GmailClientError::InvalidParameter(
+                "snooze duration exceeds maximum of 1 year".to_string(),
+            ));
+        }
+
+        return Ok(now + duration);
+    }
+
+    Err(GmailClientError::InvalidParameter(
+        "snooze requires either 'until' or 'amount' and 'units'".to_string(),
+    ))
+}
+
+fn build_new_label_from_gmail(label: &crate::gmail::types::Label, account_id: &str) -> NewLabel {
+    NewLabel {
+        org_id: DEFAULT_ORG_ID,
+        user_id: DEFAULT_USER_ID,
+        account_id: account_id.to_string(),
+        provider_label_id: label.id.clone(),
+        name: label.name.clone(),
+        label_type: label
+            .label_type
+            .clone()
+            .unwrap_or_else(|| "user".to_string()),
+        description: None,
+        available_to_classifier: true,
+        message_list_visibility: label.message_list_visibility.clone(),
+        label_list_visibility: label.label_list_visibility.clone(),
+        background_color: label
+            .color
+            .as_ref()
+            .and_then(|c| c.background_color.clone()),
+        text_color: label.color.as_ref().and_then(|c| c.text_color.clone()),
+    }
+}
+
+async fn ensure_snooze_label(
+    dispatcher: &JobDispatcher,
+    gmail_client: &GmailClient<NoopTokenStore>,
+    account_id: &str,
+    snooze_label_name: &str,
+) -> Result<String, JobError> {
+    let repo = LabelRepository::new(dispatcher.db.clone());
+
+    let existing = match repo
+        .get_by_name(
+            DEFAULT_ORG_ID,
+            DEFAULT_USER_ID,
+            account_id,
+            snooze_label_name,
+        )
+        .await
+    {
+        Ok(label) => Some(label),
+        Err(LabelError::NotFound(_)) => None,
+        Err(err) => {
+            return Err(JobError::retryable(format!(
+                "failed to lookup snooze label '{snooze_label_name}': {err}"
+            )));
+        }
+    };
+
+    let labels = gmail_client
+        .list_labels()
+        .await
+        .map_err(|err| map_gmail_error("list labels", err))?;
+
+    if let Some(cached) = existing.as_ref() {
+        if let Some(label) = labels
+            .labels
+            .iter()
+            .find(|l| l.id == cached.provider_label_id)
+        {
+            repo.upsert(build_new_label_from_gmail(label, account_id))
+                .await
+                .map_err(|err| JobError::retryable(format!("store snooze label: {err}")))?;
+
+            return Ok(label.id.clone());
+        }
+    }
+
+    if let Some(label) = labels
+        .labels
+        .iter()
+        .find(|l| l.name.eq_ignore_ascii_case(snooze_label_name))
+    {
+        if let Some(cached) = existing.as_ref() {
+            if cached.provider_label_id != label.id {
+                repo.delete_by_provider_id(
+                    DEFAULT_ORG_ID,
+                    DEFAULT_USER_ID,
+                    account_id,
+                    &cached.provider_label_id,
+                )
+                .await
+                .map_err(|err| JobError::retryable(format!("remove stale snooze label: {err}")))?;
+            }
+        }
+
+        repo.upsert(build_new_label_from_gmail(label, account_id))
+            .await
+            .map_err(|err| JobError::retryable(format!("store snooze label: {err}")))?;
+
+        return Ok(label.id.clone());
+    }
+
+    let created_label = gmail_client
+        .create_label(snooze_label_name)
+        .await
+        .map_err(|err| map_gmail_error("create snooze label", err))?;
+
+    if let Some(cached) = existing.as_ref() {
+        if cached.provider_label_id != created_label.id {
+            repo.delete_by_provider_id(
+                DEFAULT_ORG_ID,
+                DEFAULT_USER_ID,
+                account_id,
+                &cached.provider_label_id,
+            )
+            .await
+            .map_err(|err| JobError::retryable(format!("remove stale snooze label: {err}")))?;
+        }
+    }
+
+    repo.upsert(build_new_label_from_gmail(&created_label, account_id))
+        .await
+        .map_err(|err| JobError::retryable(format!("store snooze label: {err}")))?;
+
+    Ok(created_label.id)
 }
 
 /// Captures the pre-image state of a message before executing an action.
@@ -363,6 +572,79 @@ async fn execute_restore(
     Ok(ActionExecutionResult { undo_hint })
 }
 
+async fn execute_snooze(
+    dispatcher: &JobDispatcher,
+    gmail_client: &GmailClient<NoopTokenStore>,
+    message: &Message,
+    action: &Action,
+) -> Result<ActionExecutionResult, JobError> {
+    let snooze_until = parse_snooze_until(&action.parameters_json)
+        .map_err(|err| map_gmail_error("parse snooze parameters", err))?;
+
+    let pre_image = capture_pre_image(gmail_client, &message.provider_message_id)
+        .await
+        .map_err(|err| map_gmail_error("capture pre-image", err))?;
+
+    let snooze_label_name = dispatcher.gmail_config.snooze_label.clone();
+    let snooze_label_id = ensure_snooze_label(
+        dispatcher,
+        gmail_client,
+        &message.account_id,
+        &snooze_label_name,
+    )
+    .await?;
+
+    gmail_client
+        .modify_message(
+            &message.provider_message_id,
+            Some(vec![snooze_label_id.clone()]),
+            Some(vec!["INBOX".to_string()]),
+        )
+        .await
+        .map_err(|err| map_gmail_error("apply snooze labels", err))?;
+
+    let queue = JobQueue::new(dispatcher.db.clone());
+    let payload = json!({
+        "account_id": message.account_id,
+        "message_id": message.id,
+        "action_id": action.id,
+        "snooze_label_id": snooze_label_id.clone(),
+    });
+    let idempotency_key = format!("unsnooze.gmail:{}:{}", message.account_id, action.id);
+    let unsnooze_job_id = match queue
+        .enqueue_scheduled(
+            JOB_TYPE_UNSNOOZE_GMAIL,
+            payload,
+            Some(idempotency_key),
+            0,
+            snooze_until,
+        )
+        .await
+    {
+        Ok(id) => id,
+        Err(QueueError::DuplicateIdempotency {
+            existing_job_id: Some(existing),
+            ..
+        }) => existing,
+        Err(err) => return Err(JobError::retryable(format!("schedule unsnooze job: {err}"))),
+    };
+
+    let inverse_parameters = json!({
+        "add_labels": ["INBOX"],
+        "remove_labels": [snooze_label_id.clone()],
+        "cancel_unsnooze_job_id": unsnooze_job_id.clone(),
+        "note": "Undo snooze by returning to inbox and removing snooze label",
+    });
+
+    let mut undo_hint =
+        pre_image.build_undo_hint(ActionType::Snooze, ActionType::None, inverse_parameters);
+    undo_hint["snooze_until"] = json!(snooze_until);
+    undo_hint["snooze_label"] = json!(snooze_label_id);
+    undo_hint["unsnooze_job_id"] = json!(unsnooze_job_id);
+
+    Ok(ActionExecutionResult { undo_hint })
+}
+
 /// Execute the Gmail action mutation based on action type.
 ///
 /// This function dispatches to the appropriate handler based on the action_type
@@ -484,9 +766,16 @@ pub async fn handle_action_gmail(dispatcher: &JobDispatcher, job: Job) -> Result
     let gmail_client = create_gmail_client(dispatcher, &payload.account_id).await?;
 
     // Execute the action and get the result
-    let result = execute_action(&gmail_client, provider_message_id, &action).await;
+    let execution_result: Result<ActionExecutionResult, JobError> =
+        if action.action_type == "snooze" {
+            execute_snooze(dispatcher, &gmail_client, &message, &action).await
+        } else {
+            execute_action(&gmail_client, provider_message_id, &action)
+                .await
+                .map_err(|err| map_gmail_error("execute gmail action", err))
+        };
 
-    match result {
+    match execution_result {
         Ok(execution_result) => {
             // Mark completed with undo hint
             repo.mark_completed_with_undo_hint(
@@ -509,9 +798,7 @@ pub async fn handle_action_gmail(dispatcher: &JobDispatcher, job: Job) -> Result
 
             Ok(())
         }
-        Err(gmail_err) => {
-            let job_error = map_gmail_error("execute gmail action", gmail_err);
-
+        Err(job_error) => {
             let attempts_exhausted = job.attempts >= job.max_attempts;
 
             // Mark the action as failed for fatal errors or when no retries remain; otherwise
@@ -810,6 +1097,103 @@ mod tests {
         assert_eq!(undo_hint["action"], "mark_unread");
         assert_eq!(undo_hint["inverse_action"], "mark_read");
         assert_eq!(undo_hint["pre_unread"], false);
+    }
+
+    // ===== Snooze parameter parsing =====
+
+    #[test]
+    fn parse_snooze_with_absolute_until() {
+        let until = (Utc::now() + chrono::Duration::minutes(10))
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let parsed = parse_snooze_until(&json!({"until": until})).expect("parse");
+        let diff = (parsed - Utc::now()).num_minutes();
+        assert!(diff >= 9 && diff <= 10);
+    }
+
+    #[test]
+    fn parse_snooze_with_duration() {
+        let parsed =
+            parse_snooze_until(&json!({"amount": 2, "units": "hours"})).expect("parse duration");
+        let diff = (parsed - Utc::now()).num_minutes();
+        assert!(diff >= 119 && diff <= 121);
+    }
+
+    #[test]
+    fn parse_snooze_rejects_past_until() {
+        let until = (Utc::now() - chrono::Duration::minutes(1))
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let err = parse_snooze_until(&json!({"until": until})).unwrap_err();
+        match err {
+            GmailClientError::InvalidParameter(msg) => {
+                assert!(msg.contains("future"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_snooze_rejects_missing_fields() {
+        let err = parse_snooze_until(&json!({})).unwrap_err();
+        assert!(matches!(err, GmailClientError::InvalidParameter(_)));
+    }
+
+    #[test]
+    fn parse_snooze_rejects_overlong_duration() {
+        let err = parse_snooze_until(&json!({"amount": 400, "units": "days"})).unwrap_err();
+        match err {
+            GmailClientError::InvalidParameter(msg) => {
+                assert!(msg.contains("1 year"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_snooze_rejects_non_positive_amount() {
+        let err = parse_snooze_until(&json!({"amount": 0, "units": "hours"})).unwrap_err();
+        match err {
+            GmailClientError::InvalidParameter(msg) => {
+                assert!(msg.contains("greater than"), "unexpected message: {msg}");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+
+        let err = parse_snooze_until(&json!({"amount": -3, "units": "hours"})).unwrap_err();
+        match err {
+            GmailClientError::InvalidParameter(msg) => {
+                assert!(msg.contains("greater than"), "unexpected message: {msg}");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_snooze_rejects_unknown_units() {
+        let err = parse_snooze_until(&json!({"amount": 1, "units": "weeks"})).unwrap_err();
+        match err {
+            GmailClientError::InvalidParameter(msg) => {
+                assert!(
+                    msg.contains("unsupported units"),
+                    "unexpected message: {msg}"
+                );
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_snooze_rejects_mixed_formats() {
+        let until = (Utc::now() + chrono::Duration::hours(1))
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let err = parse_snooze_until(&json!({"until": until, "amount": 1, "units": "hours"}))
+            .unwrap_err();
+
+        match err {
+            GmailClientError::InvalidParameter(msg) => {
+                assert!(msg.contains("either 'until'"), "unexpected message: {msg}");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 
     // ===== Integration tests for capture_pre_image =====
@@ -1181,6 +1565,7 @@ mod tests {
         use crate::constants::{DEFAULT_ORG_ID, DEFAULT_USER_ID};
         use crate::decisions::{ActionRepository, ActionStatus, NewAction};
         use crate::gmail::{NoopTokenStore, OAuthTokens};
+        use crate::labels::LabelRepository;
         use crate::llm::MockLLMClient;
         use crate::messages::{Mailbox, MessageRepository, NewMessage};
         use crate::migrations::run_migrations;
@@ -2558,8 +2943,7 @@ mod tests {
             let (db, _dir) = setup_db().await;
             let (_, account_id) = setup_account(&db).await;
             let message_id = setup_message(&db, &account_id, "msg-123").await;
-            let action_id =
-                setup_action(&db, &account_id, &message_id, "archive", json!({})).await;
+            let action_id = setup_action(&db, &account_id, &message_id, "archive", json!({})).await;
 
             let queue = JobQueue::new(db.clone());
             let job_id = queue
@@ -2777,6 +3161,303 @@ mod tests {
             assert_eq!(action.status, ActionStatus::Completed);
             assert_eq!(action.undo_hint_json["action"], "delete");
             assert_eq!(action.undo_hint_json["irreversible"], true);
+        }
+
+        #[tokio::test]
+        async fn handle_action_gmail_schedules_unsnooze_and_applies_label() {
+            let server = MockServer::start().await;
+            let api_base = format!("{}/gmail/v1/users", &server.uri());
+
+            let snooze_until = (Utc::now() + chrono::Duration::minutes(5))
+                .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+
+            // Pre-image capture
+            Mock::given(method("GET"))
+                .and(path("/gmail/v1/users/user@example.com/messages/msg-123"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(
+                    build_gmail_message_response("msg-123", vec!["INBOX", "UNREAD"]),
+                ))
+                .expect(1)
+                .mount(&server)
+                .await;
+
+            Mock::given(method("GET"))
+                .and(path("/gmail/v1/users/user@example.com/labels"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({"labels": []})))
+                .expect(1)
+                .mount(&server)
+                .await;
+
+            // Create label
+            Mock::given(method("POST"))
+                .and(path("/gmail/v1/users/user@example.com/labels"))
+                .and(body_json(json!({"name": "Ashford/Snoozed"})))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "id": "Label_Snoozed",
+                    "name": "Ashford/Snoozed",
+                    "type": "user"
+                })))
+                .expect(1)
+                .mount(&server)
+                .await;
+
+            // Apply snooze: remove INBOX, add snooze label
+            Mock::given(method("POST"))
+                .and(path(
+                    "/gmail/v1/users/user@example.com/messages/msg-123/modify",
+                ))
+                .and(body_json(json!({
+                    "addLabelIds": ["Label_Snoozed"],
+                    "removeLabelIds": ["INBOX"]
+                })))
+                .respond_with(ResponseTemplate::new(200).set_body_json(
+                    build_gmail_message_response("msg-123", vec!["Label_Snoozed", "UNREAD"]),
+                ))
+                .expect(1)
+                .mount(&server)
+                .await;
+
+            let (db, _dir) = setup_db().await;
+            let (_, account_id) = setup_account(&db).await;
+            let message_id = setup_message(&db, &account_id, "msg-123").await;
+            let action_id = setup_action(
+                &db,
+                &account_id,
+                &message_id,
+                "snooze",
+                json!({"until": snooze_until}),
+            )
+            .await;
+
+            let queue = JobQueue::new(db.clone());
+            let job_id = queue
+                .enqueue(
+                    JOB_TYPE,
+                    json!({"account_id": account_id.clone(), "action_id": action_id.clone()}),
+                    None,
+                    1,
+                )
+                .await
+                .expect("enqueue job");
+            let job = queue.fetch_job(&job_id).await.expect("fetch job");
+
+            let dispatcher = JobDispatcher::new(
+                db.clone(),
+                reqwest::Client::new(),
+                Arc::new(MockLLMClient::new()),
+                PolicyConfig::default(),
+            )
+            .with_gmail_api_base(api_base);
+
+            handle_action_gmail(&dispatcher, job)
+                .await
+                .expect("snooze action should succeed");
+
+            // Verify action completion and undo hint metadata
+            let action_repo = ActionRepository::new(db.clone());
+            let action = action_repo
+                .get_by_id(DEFAULT_ORG_ID, DEFAULT_USER_ID, &action_id)
+                .await
+                .expect("get action");
+
+            assert_eq!(action.status, ActionStatus::Completed);
+            assert_eq!(action.undo_hint_json["action"], "snooze");
+            assert_eq!(action.undo_hint_json["inverse_action"], "none");
+            assert_eq!(action.undo_hint_json["snooze_label"], "Label_Snoozed");
+            assert_eq!(
+                action.undo_hint_json["inverse_parameters"]["add_labels"],
+                json!(["INBOX"])
+            );
+            assert_eq!(
+                action.undo_hint_json["inverse_parameters"]["remove_labels"],
+                json!(["Label_Snoozed"])
+            );
+
+            let unsnooze_job_id = action.undo_hint_json["unsnooze_job_id"]
+                .as_str()
+                .expect("job id present")
+                .to_string();
+
+            assert_eq!(
+                action.undo_hint_json["inverse_parameters"]["cancel_unsnooze_job_id"],
+                json!(unsnooze_job_id)
+            );
+
+            let queue = JobQueue::new(db.clone());
+            let unsnooze_job = queue
+                .fetch_job(&unsnooze_job_id)
+                .await
+                .expect("unsnooze job exists");
+            assert_eq!(unsnooze_job.job_type, JOB_TYPE_UNSNOOZE_GMAIL);
+            assert_eq!(
+                unsnooze_job.payload["snooze_label_id"],
+                json!("Label_Snoozed")
+            );
+
+            let parsed_until = DateTime::parse_from_rfc3339(
+                action.undo_hint_json["snooze_until"].as_str().unwrap(),
+            )
+            .unwrap()
+            .with_timezone(&Utc);
+            let diff = unsnooze_job
+                .not_before
+                .expect("not_before set")
+                .signed_duration_since(parsed_until)
+                .num_seconds()
+                .abs();
+            assert!(diff <= 1, "unsnooze job scheduled at expected time");
+
+            // Snooze label should be stored locally
+            let label_repo = LabelRepository::new(db.clone());
+            let stored = label_repo
+                .get_by_name(
+                    DEFAULT_ORG_ID,
+                    DEFAULT_USER_ID,
+                    &account_id,
+                    "Ashford/Snoozed",
+                )
+                .await
+                .expect("label stored");
+            assert_eq!(stored.provider_label_id, "Label_Snoozed");
+        }
+
+        #[tokio::test]
+        async fn handle_action_gmail_recreates_missing_snooze_label_when_cached() {
+            let server = MockServer::start().await;
+            let api_base = format!("{}/gmail/v1/users", &server.uri());
+
+            let snooze_until = (Utc::now() + chrono::Duration::minutes(10))
+                .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+
+            // Pre-image capture
+            Mock::given(method("GET"))
+                .and(path("/gmail/v1/users/user@example.com/messages/msg-123"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_json(build_gmail_message_response("msg-123", vec!["INBOX"])),
+                )
+                .expect(1)
+                .mount(&server)
+                .await;
+
+            // Gmail currently has a fresh snooze label with a new id, cached id is stale
+            Mock::given(method("GET"))
+                .and(path("/gmail/v1/users/user@example.com/labels"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "labels": [
+                        {"id": "Label_Fresh", "name": "Ashford/Snoozed", "type": "user"}
+                    ]
+                })))
+                .expect(1)
+                .mount(&server)
+                .await;
+
+            // Modify should use the fresh label id
+            Mock::given(method("POST"))
+                .and(path(
+                    "/gmail/v1/users/user@example.com/messages/msg-123/modify",
+                ))
+                .and(body_json(json!({
+                    "addLabelIds": ["Label_Fresh"],
+                    "removeLabelIds": ["INBOX"]
+                })))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_json(build_gmail_message_response(
+                        "msg-123",
+                        vec!["Label_Fresh"],
+                    )),
+                )
+                .expect(1)
+                .mount(&server)
+                .await;
+
+            let (db, _dir) = setup_db().await;
+            let (_, account_id) = setup_account(&db).await;
+            let message_id = setup_message(&db, &account_id, "msg-123").await;
+
+            // Seed stale cached label
+            let label_repo = LabelRepository::new(db.clone());
+            label_repo
+                .upsert(NewLabel {
+                    org_id: DEFAULT_ORG_ID,
+                    user_id: DEFAULT_USER_ID,
+                    account_id: account_id.clone(),
+                    provider_label_id: "Label_Stale".to_string(),
+                    name: "Ashford/Snoozed".to_string(),
+                    label_type: "user".to_string(),
+                    description: None,
+                    available_to_classifier: true,
+                    message_list_visibility: None,
+                    label_list_visibility: None,
+                    background_color: None,
+                    text_color: None,
+                })
+                .await
+                .expect("seed label");
+
+            let action_id = setup_action(
+                &db,
+                &account_id,
+                &message_id,
+                "snooze",
+                json!({"until": snooze_until}),
+            )
+            .await;
+
+            let queue = JobQueue::new(db.clone());
+            let job_id = queue
+                .enqueue(
+                    JOB_TYPE,
+                    json!({"account_id": account_id.clone(), "action_id": action_id.clone()}),
+                    None,
+                    1,
+                )
+                .await
+                .expect("enqueue job");
+            let job = queue.fetch_job(&job_id).await.expect("fetch job");
+
+            let dispatcher = JobDispatcher::new(
+                db.clone(),
+                reqwest::Client::new(),
+                Arc::new(MockLLMClient::new()),
+                PolicyConfig::default(),
+            )
+            .with_gmail_api_base(api_base);
+
+            handle_action_gmail(&dispatcher, job)
+                .await
+                .expect("snooze action should succeed");
+
+            let stored = label_repo
+                .get_by_name(
+                    DEFAULT_ORG_ID,
+                    DEFAULT_USER_ID,
+                    &account_id,
+                    "Ashford/Snoozed",
+                )
+                .await
+                .expect("label stored");
+            assert_eq!(stored.provider_label_id, "Label_Fresh");
+
+            let action_repo = ActionRepository::new(db.clone());
+            let action = action_repo
+                .get_by_id(DEFAULT_ORG_ID, DEFAULT_USER_ID, &action_id)
+                .await
+                .expect("get action");
+
+            let unsnooze_job_id = action.undo_hint_json["unsnooze_job_id"]
+                .as_str()
+                .expect("job id present");
+
+            let queue = JobQueue::new(db.clone());
+            let unsnooze_job = queue
+                .fetch_job(unsnooze_job_id)
+                .await
+                .expect("unsnooze job exists");
+            assert_eq!(
+                unsnooze_job.payload["snooze_label_id"],
+                json!("Label_Fresh")
+            );
         }
 
         #[tokio::test]

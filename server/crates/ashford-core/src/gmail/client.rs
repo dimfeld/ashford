@@ -4,6 +4,7 @@ use chrono::Utc;
 use reqwest::{Client, StatusCode};
 use serde::de::DeserializeOwned;
 use serde_json;
+use serde_json::json;
 use thiserror::Error;
 use tokio::sync::{Mutex, RwLock};
 
@@ -13,7 +14,7 @@ use crate::gmail::{
         refresh_access_token_with_endpoint,
     },
     types::{
-        ListHistoryResponse, ListLabelsResponse, ListMessagesResponse, Message,
+        Label, ListHistoryResponse, ListLabelsResponse, ListMessagesResponse, Message,
         ModifyMessageRequest, Profile, Thread,
     },
 };
@@ -169,6 +170,38 @@ impl<S: TokenStore> GmailClient<S> {
     pub async fn list_labels(&self) -> Result<ListLabelsResponse, GmailClientError> {
         let url = format!("{}/{}/labels", self.api_base, self.user_id);
         self.send_json(|| self.http.get(&url)).await
+    }
+
+    /// Creates a new user label. If the label already exists, returns the existing label.
+    pub async fn create_label(&self, name: &str) -> Result<Label, GmailClientError> {
+        if name.trim().is_empty() {
+            return Err(GmailClientError::InvalidParameter(
+                "label name cannot be empty".to_string(),
+            ));
+        }
+
+        let url = format!("{}/{}/labels", self.api_base, self.user_id);
+        let body = json!({ "name": name });
+
+        match self
+            .perform_authenticated(|| self.http.post(&url).json(&body))
+            .await
+        {
+            Ok(response) => {
+                let text = response.text().await?;
+                serde_json::from_str(&text).map_err(GmailClientError::Decode)
+            }
+            Err(GmailClientError::Http(err)) if err.status() == Some(StatusCode::CONFLICT) => {
+                // Label already exists. Fall back to listing labels and returning the match.
+                let labels = self.list_labels().await?;
+                labels
+                    .labels
+                    .into_iter()
+                    .find(|label| label.name.eq_ignore_ascii_case(name))
+                    .ok_or(GmailClientError::Http(err))
+            }
+            Err(other) => Err(other),
+        }
     }
 
     /// Modifies the labels on a message.
@@ -1134,6 +1167,81 @@ mod tests {
         let color = label.color.as_ref().expect("should have color");
         assert_eq!(color.background_color.as_deref(), Some("#ff0000"));
         assert!(color.text_color.is_none());
+    }
+
+    #[tokio::test]
+    async fn create_label_creates_label() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/gmail/v1/users/me/labels"))
+            .and(body_json(json!({"name": "Ashford/Snoozed"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "Label_Snoozed",
+                "name": "Ashford/Snoozed",
+                "type": "user"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let tokens = OAuthTokens {
+            access_token: "token".into(),
+            refresh_token: "refresh".into(),
+            expires_at: Utc::now() + Duration::hours(1),
+        };
+        let store = Arc::new(RecordingStore::default());
+        let client = make_client(&server, tokens, store);
+
+        let label = client
+            .create_label("Ashford/Snoozed")
+            .await
+            .expect("create_label succeeds");
+
+        assert_eq!(label.id, "Label_Snoozed");
+        assert_eq!(label.name, "Ashford/Snoozed");
+        assert_eq!(label.label_type.as_deref(), Some("user"));
+    }
+
+    #[tokio::test]
+    async fn create_label_returns_existing_on_conflict() {
+        let server = MockServer::start().await;
+
+        // First attempt returns 409 Conflict
+        Mock::given(method("POST"))
+            .and(path("/gmail/v1/users/me/labels"))
+            .respond_with(ResponseTemplate::new(409))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        // Fallback list_labels returns the existing label
+        Mock::given(method("GET"))
+            .and(path("/gmail/v1/users/me/labels"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "labels": [
+                    {"id": "Label_123", "name": "Ashford/Snoozed", "type": "user"}
+                ]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let tokens = OAuthTokens {
+            access_token: "token".into(),
+            refresh_token: "refresh".into(),
+            expires_at: Utc::now() + Duration::hours(1),
+        };
+        let store = Arc::new(RecordingStore::default());
+        let client = make_client(&server, tokens, store);
+
+        let label = client
+            .create_label("Ashford/Snoozed")
+            .await
+            .expect("existing label is returned");
+
+        assert_eq!(label.id, "Label_123");
+        assert_eq!(label.name, "Ashford/Snoozed");
     }
 
     #[tokio::test]

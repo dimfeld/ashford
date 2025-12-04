@@ -32,7 +32,7 @@ pub use gmail::{
 };
 pub use jobs::{
     JOB_TYPE_ACTION_GMAIL, JOB_TYPE_APPROVAL_NOTIFY, JOB_TYPE_CLASSIFY,
-    JOB_TYPE_HISTORY_SYNC_GMAIL, JOB_TYPE_INGEST_GMAIL, JobDispatcher,
+    JOB_TYPE_HISTORY_SYNC_GMAIL, JOB_TYPE_INGEST_GMAIL, JOB_TYPE_UNSNOOZE_GMAIL, JobDispatcher,
 };
 pub use labels::{Label, LabelError, LabelRepository, NewLabel};
 pub use llm::{

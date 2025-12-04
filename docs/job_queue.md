@@ -4,7 +4,8 @@
 
     - ingest.gmail - Fetch and persist a Gmail message
     - classify - Evaluate rules and LLM to determine action
-    - action.gmail - Execute Gmail actions (archive, apply_label, remove_label, mark_read, mark_unread, star, unstar, trash, restore, delete)
+    - action.gmail - Execute Gmail actions (archive, apply_label, remove_label, mark_read, mark_unread, star, unstar, trash, restore, delete, snooze)
+    - unsnooze.gmail - Restore snoozed messages to inbox at scheduled time
     - approval.notify - Request approval via Discord
     - undo - Reverse a previous action
     - outbound.send - Send auto_reply/forward emails
@@ -90,9 +91,28 @@ pub struct JobDispatcher {
 Job type constants are defined in `server/crates/ashford-core/src/jobs/mod.rs`:
 - `JOB_TYPE_INGEST_GMAIL` = "ingest.gmail"
 - `JOB_TYPE_CLASSIFY` = "classify"
+- `JOB_TYPE_ACTION_GMAIL` = "action.gmail"
+- `JOB_TYPE_UNSNOOZE_GMAIL` = "unsnooze.gmail"
 - `JOB_TYPE_HISTORY_SYNC_GMAIL` = "history.sync.gmail"
 - `JOB_TYPE_BACKFILL_GMAIL` = "backfill.gmail"
 - `JOB_TYPE_LABELS_SYNC_GMAIL` = "labels.sync.gmail"
+
+### 5.3.1 Scheduled Jobs
+
+Jobs can be scheduled for future execution using the `not_before` field. The `JobQueue` provides an `enqueue_scheduled()` method for this:
+
+```rust
+pub async fn enqueue_scheduled(
+    &self,
+    job_type: impl Into<String>,
+    payload: Value,
+    idempotency_key: Option<String>,
+    priority: i64,
+    not_before: DateTime<Utc>,
+) -> Result<String, QueueError>
+```
+
+Scheduled jobs remain in `queued` state but are not claimed by workers until `not_before <= now()`. This is used by the snooze action to schedule unsnooze jobs at the target wake time.
 
 ### **5.4 Error Handling**
 
@@ -220,6 +240,7 @@ The action.gmail job executes Gmail mutations based on action records created by
 | `trash` | `trash_message` | Move to trash |
 | `restore` | `untrash_message` | Restore from trash |
 | `delete` | `delete_message` | Permanently delete (irreversible) |
+| `snooze` | `modify_message` + schedule job | Archive and schedule unsnooze |
 
 **Parameter Validation**:
 - `apply_label` and `remove_label` require a non-empty `label` field in `parameters_json`
@@ -227,6 +248,16 @@ The action.gmail job executes Gmail mutations based on action records created by
 
 **Undo Hints**:
 Each action captures pre-mutation state and stores the inverse operation in `undo_hint_json`. For example, archiving captures the current labels so the message can be restored to INBOX. The `delete` action is irreversible and stores a marker indicating it cannot be undone.
+
+**Snooze Action**:
+The snooze action has special behavior:
+1. Validates parameters: accepts `{until: ISO8601}` or `{amount: number, units: "minutes"|"hours"|"days"}`
+2. Ensures the snooze label exists (creates via Gmail API if needed)
+3. Removes INBOX label and adds the snooze label
+4. Schedules an `unsnooze.gmail` job with `not_before` set to the snooze target time
+5. Stores enriched undo_hint with `snooze_until`, `snooze_label`, `snooze_label_id`, and `unsnooze_job_id`
+
+The snooze label is configurable via `gmail.snooze_label` (default: "Ashford/Snoozed"). The unsnooze job payload includes the `snooze_label_id` so unsnooze removes the correct label even if the config is changed later.
 
 **Error Handling**:
 - 404 Not Found → Fatal error (message deleted externally)
@@ -236,4 +267,33 @@ Each action captures pre-mutation state and stores the inverse operation in `und
 - Invalid parameters → Fatal error (misconfigured action)
 
 **Idempotency key**: `action.gmail:{account_id}:{action_id}`
+
+### 5.8 Unsnooze Gmail Job
+
+The unsnooze.gmail job restores snoozed messages to the inbox at the scheduled time.
+
+**Payload**:
+```json
+{
+  "account_id": "uuid",
+  "message_id": "uuid",
+  "action_id": "uuid",
+  "snooze_label_id": "Label_123456789"
+}
+```
+
+**Flow**:
+1. Parse payload and refresh OAuth tokens
+2. Add INBOX label to the message
+3. Remove the snooze label (uses `snooze_label_id` from payload, falls back to current config if missing)
+4. Handle edge cases gracefully
+
+**Edge Case Handling**:
+- **Message deleted**: If Gmail returns 404, the job completes successfully (nothing to restore)
+- **Label already removed**: The job proceeds with adding INBOX; label removal is a no-op
+- **Rate limiting**: Retried with exponential backoff
+
+**Idempotency key**: `unsnooze.gmail:{account_id}:{action_id}`
+
+The unsnooze job is scheduled by the snooze action with `not_before` set to the snooze target time. It runs as a consequence of snoozing, not as a user-initiated undo operation.
 

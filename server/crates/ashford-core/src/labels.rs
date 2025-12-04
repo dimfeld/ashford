@@ -190,6 +190,24 @@ impl LabelRepository {
         }
     }
 
+    /// Delete a label by provider_label_id for an account. No-op if it does not exist.
+    pub async fn delete_by_provider_id(
+        &self,
+        org_id: i64,
+        user_id: i64,
+        account_id: &str,
+        provider_label_id: &str,
+    ) -> Result<(), LabelError> {
+        let conn = self.db.connection().await?;
+        conn.execute(
+            "DELETE FROM labels WHERE org_id = ?1 AND user_id = ?2 AND account_id = ?3 AND provider_label_id = ?4",
+            params![org_id, user_id, account_id, provider_label_id],
+        )
+        .await?;
+
+        Ok(())
+    }
+
     /// Get labels where available_to_classifier = true for an account.
     pub async fn get_available_for_classifier(
         &self,

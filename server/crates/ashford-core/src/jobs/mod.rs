@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use reqwest::StatusCode;
 
 use crate::accounts::AccountError;
-use crate::config::PolicyConfig;
+use crate::config::{GmailConfig, PolicyConfig};
 use crate::decisions::ActionError;
 use crate::gmail::GmailClientError;
 use crate::gmail::oauth::OAuthError;
@@ -20,6 +20,7 @@ mod classify;
 mod history_sync_gmail;
 mod ingest_gmail;
 mod labels_sync_gmail;
+mod unsnooze_gmail;
 
 use action_gmail::handle_action_gmail;
 use approval_notify::handle_approval_notify;
@@ -28,6 +29,7 @@ use classify::handle_classify;
 use history_sync_gmail::handle_history_sync_gmail;
 use ingest_gmail::handle_ingest_gmail;
 use labels_sync_gmail::handle_labels_sync_gmail;
+use unsnooze_gmail::handle_unsnooze_gmail;
 
 pub const JOB_TYPE_ACTION_GMAIL: &str = action_gmail::JOB_TYPE;
 pub const JOB_TYPE_APPROVAL_NOTIFY: &str = approval_notify::JOB_TYPE;
@@ -36,12 +38,14 @@ pub const JOB_TYPE_CLASSIFY: &str = "classify";
 pub const JOB_TYPE_INGEST_GMAIL: &str = "ingest.gmail";
 pub const JOB_TYPE_HISTORY_SYNC_GMAIL: &str = "history.sync.gmail";
 pub const JOB_TYPE_LABELS_SYNC_GMAIL: &str = labels_sync_gmail::JOB_TYPE;
+pub const JOB_TYPE_UNSNOOZE_GMAIL: &str = unsnooze_gmail::JOB_TYPE;
 
 #[derive(Clone)]
 pub struct JobDispatcher {
     pub db: Database,
     pub http: reqwest::Client,
     pub gmail_api_base: Option<String>,
+    pub gmail_config: GmailConfig,
     pub llm_client: Arc<dyn LLMClient>,
     pub policy_config: PolicyConfig,
 }
@@ -57,6 +61,7 @@ impl JobDispatcher {
             db,
             http,
             gmail_api_base: None,
+            gmail_config: GmailConfig::default(),
             llm_client,
             policy_config,
         }
@@ -64,6 +69,11 @@ impl JobDispatcher {
 
     pub fn with_gmail_api_base(mut self, base: impl Into<String>) -> Self {
         self.gmail_api_base = Some(base.into());
+        self
+    }
+
+    pub fn with_gmail_config(mut self, gmail_config: GmailConfig) -> Self {
+        self.gmail_config = gmail_config;
         self
     }
 }
@@ -79,6 +89,7 @@ impl JobExecutor for JobDispatcher {
             JOB_TYPE_INGEST_GMAIL => handle_ingest_gmail(self, job).await,
             JOB_TYPE_HISTORY_SYNC_GMAIL => handle_history_sync_gmail(self, job).await,
             JOB_TYPE_LABELS_SYNC_GMAIL => handle_labels_sync_gmail(self, job).await,
+            JOB_TYPE_UNSNOOZE_GMAIL => handle_unsnooze_gmail(self, job).await,
             other => Err(JobError::Fatal(format!("unknown job type: {other}"))),
         }
     }

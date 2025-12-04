@@ -60,6 +60,19 @@ pub struct GmailConfig {
     pub use_pubsub: bool,
     pub project_id: String,
     pub subscription: String,
+    #[serde(default = "default_snooze_label")]
+    pub snooze_label: String,
+}
+
+impl Default for GmailConfig {
+    fn default() -> Self {
+        Self {
+            use_pubsub: false,
+            project_id: String::new(),
+            subscription: String::new(),
+            snooze_label: default_snooze_label(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -154,6 +167,7 @@ impl Config {
         }
         apply_env_marker(&mut self.gmail.project_id)?;
         apply_env_marker(&mut self.gmail.subscription)?;
+        apply_env_marker(&mut self.gmail.snooze_label)?;
         apply_env_marker(&mut self.imap.archive_folder)?;
         apply_env_marker(&mut self.imap.snooze_folder)?;
         apply_env_marker_path(&mut self.paths.database)?;
@@ -183,6 +197,10 @@ fn apply_env_marker_path(path: &mut PathBuf) -> Result<(), ConfigError> {
     apply_env_marker(&mut value)?;
     *path = PathBuf::from(value);
     Ok(())
+}
+
+fn default_snooze_label() -> String {
+    "Ashford/Snoozed".to_string()
 }
 
 #[cfg(test)]
@@ -303,6 +321,7 @@ confidence_default = 0.7
                 assert_eq!(cfg.discord.whitelist, vec!["user#1".to_string()]);
                 assert_eq!(cfg.gmail.project_id, "project-1");
                 assert_eq!(cfg.gmail.subscription, "sub-1");
+                assert_eq!(cfg.gmail.snooze_label, "Ashford/Snoozed");
             },
         );
     }

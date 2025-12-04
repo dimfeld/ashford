@@ -33,7 +33,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         reqwest::Client::new(),
         llm_client,
         config.policy.clone(),
-    );
+    )
+    .with_gmail_config(config.gmail.clone());
     let shutdown = CancellationToken::new();
     let worker_shutdown = shutdown.child_token();
     let worker_handle = tokio::spawn(run_worker(

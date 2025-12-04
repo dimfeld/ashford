@@ -142,6 +142,55 @@ impl JobQueue {
         }
     }
 
+    pub async fn enqueue_scheduled(
+        &self,
+        job_type: impl Into<String>,
+        payload: Value,
+        idempotency_key: Option<String>,
+        priority: i64,
+        not_before: DateTime<Utc>,
+    ) -> Result<String, QueueError> {
+        let id = Uuid::new_v4().to_string();
+        let now = now_rfc3339();
+        let payload_json = serde_json::to_string(&payload)?;
+        let idempotency = idempotency_key.clone();
+        let mut conn = self.db.connection().await?;
+
+        let result = conn
+            .execute(
+                "INSERT INTO jobs (id, type, payload_json, priority, state, attempts, max_attempts, not_before, idempotency_key, last_error, heartbeat_at, created_at, updated_at, finished_at, result_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5, 0, 5, ?6, ?7, NULL, NULL, ?8, ?8, NULL, NULL)",
+                params![
+                    id.clone(),
+                    job_type.into(),
+                    payload_json,
+                    priority,
+                    JobState::Queued.as_str(),
+                    not_before.to_rfc3339_opts(SecondsFormat::Millis, true),
+                    idempotency.clone(),
+                    now.clone()
+                ],
+            )
+            .await;
+
+        match result {
+            Ok(_) => Ok(id),
+            Err(err) if is_unique_violation(&err) && idempotency.is_some() => {
+                let existing =
+                    lookup_job_by_idempotency(&mut conn, idempotency.as_deref().unwrap())
+                        .await
+                        .ok()
+                        .flatten();
+                let key = idempotency.unwrap();
+                Err(QueueError::DuplicateIdempotency {
+                    key,
+                    existing_job_id: existing,
+                })
+            }
+            Err(err) => Err(err.into()),
+        }
+    }
+
     pub async fn claim_next(&self) -> Result<Option<Job>, QueueError> {
         let now = now_rfc3339();
         let conn = self.db.connection().await?;
@@ -503,6 +552,27 @@ mod tests {
         assert_eq!(claimed.attempts, 1);
         assert_eq!(claimed.priority, 1);
         assert_eq!(claimed.payload["msg"], 1);
+    }
+
+    #[tokio::test]
+    async fn enqueue_scheduled_sets_not_before() {
+        let (queue, _dir) = setup_queue().await;
+        let target = Utc::now() + chrono::Duration::seconds(2);
+
+        let id = queue
+            .enqueue_scheduled("future.job", json!({"task": true}), None, 0, target)
+            .await
+            .expect("enqueue scheduled");
+
+        let job = queue.fetch_job(&id).await.expect("fetch job");
+        let scheduled = job.not_before.expect("not_before should be set");
+
+        // Allow small drift due to test timing
+        let diff = (scheduled - target).num_milliseconds().abs();
+        assert!(
+            diff < 20,
+            "not_before should match target time closely, diff={diff}"
+        );
     }
 
     #[tokio::test]

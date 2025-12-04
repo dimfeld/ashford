@@ -40,6 +40,7 @@ Example:
     use_pubsub = true
     project_id = "your-gcp-project"
     subscription = "gmail-sub"
+    snooze_label = "Ashford/Snoozed"  # Label for snoozed messages (auto-created if missing)
     
     [imap]
     idle = true
