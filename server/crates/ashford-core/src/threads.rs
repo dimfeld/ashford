@@ -134,6 +134,30 @@ impl ThreadRepository {
         }
     }
 
+    pub async fn get_by_id(
+        &self,
+        org_id: i64,
+        user_id: i64,
+        id: &str,
+    ) -> Result<Thread, ThreadError> {
+        let conn = self.db.connection().await?;
+        let mut rows = conn
+            .query(
+                &format!(
+                    "SELECT {THREAD_COLUMNS}
+                     FROM threads
+                     WHERE org_id = ?1 AND user_id = ?2 AND id = ?3"
+                ),
+                params![org_id, user_id, id],
+            )
+            .await?;
+
+        match rows.next().await? {
+            Some(row) => row_to_thread(row),
+            None => Err(ThreadError::NotFound(id.to_string())),
+        }
+    }
+
     pub async fn update_last_message_at(
         &self,
         org_id: i64,

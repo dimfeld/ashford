@@ -15,7 +15,7 @@ use crate::gmail::{
     },
     types::{
         Label, ListHistoryResponse, ListLabelsResponse, ListMessagesResponse, Message,
-        ModifyMessageRequest, Profile, Thread,
+        ModifyMessageRequest, Profile, SendMessageRequest, SendMessageResponse, Thread,
     },
 };
 
@@ -91,6 +91,17 @@ impl<S: TokenStore> GmailClient<S> {
     /// and label metadata. This avoids downloading full payloads when we only need labels.
     pub async fn get_message_minimal(&self, message_id: &str) -> Result<Message, GmailClientError> {
         self.get_message_with_format(message_id, "minimal").await
+    }
+
+    /// Fetches the raw RFC 822 representation of a message (base64url encoded).
+    pub async fn get_message_raw(&self, message_id: &str) -> Result<String, GmailClientError> {
+        let message = self.get_message_with_format(message_id, "raw").await?;
+        match message.raw {
+            Some(raw) => Ok(raw),
+            None => Err(GmailClientError::Decode(serde_json::Error::io(
+                std::io::Error::new(std::io::ErrorKind::InvalidData, "raw message not returned"),
+            ))),
+        }
     }
 
     async fn get_message_with_format(
@@ -204,6 +215,20 @@ impl<S: TokenStore> GmailClient<S> {
         }
     }
 
+    /// Fetches a single attachment body by attachment ID for a message.
+    pub async fn get_attachment(
+        &self,
+        message_id: &str,
+        attachment_id: &str,
+    ) -> Result<crate::gmail::types::MessageAttachment, GmailClientError> {
+        let url = format!(
+            "{}/{}/messages/{}/attachments/{}",
+            self.api_base, self.user_id, message_id, attachment_id
+        );
+
+        self.send_json(|| self.http.get(&url)).await
+    }
+
     /// Modifies the labels on a message.
     ///
     /// # Arguments
@@ -277,6 +302,25 @@ impl<S: TokenStore> GmailClient<S> {
     pub async fn delete_message(&self, message_id: &str) -> Result<(), GmailClientError> {
         let url = format!("{}/{}/messages/{}", self.api_base, self.user_id, message_id);
         self.send_empty_response(|| self.http.delete(&url)).await
+    }
+
+    /// Sends an email message via the Gmail API.
+    ///
+    /// The raw message must be an RFC 5322 formatted email encoded with
+    /// base64url (URL_SAFE_NO_PAD). Pass `thread_id` to keep the message
+    /// in the same conversation when replying.
+    pub async fn send_message(
+        &self,
+        raw_message: impl Into<String>,
+        thread_id: Option<String>,
+    ) -> Result<SendMessageResponse, GmailClientError> {
+        let url = format!("{}/{}/messages/send", self.api_base, self.user_id);
+        let request = SendMessageRequest {
+            raw: raw_message.into(),
+            thread_id,
+        };
+
+        self.send_json(|| self.http.post(&url).json(&request)).await
     }
 
     async fn send_json<T, B>(&self, build: B) -> Result<T, GmailClientError>
@@ -1941,5 +1985,78 @@ mod tests {
         let saved = store.saved.lock().await;
         assert_eq!(saved.len(), 1);
         assert_eq!(saved[0].access_token, "fresh_token");
+    }
+
+    #[tokio::test]
+    async fn send_message_posts_raw_and_thread_id() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/gmail/v1/users/me/messages/send"))
+            .and(body_json(json!({
+                "raw": "encoded-message",
+                "threadId": "thread-abc"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "sent-123",
+                "threadId": "thread-abc",
+                "labelIds": ["SENT"]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let tokens = OAuthTokens {
+            access_token: "token".into(),
+            refresh_token: "refresh".into(),
+            expires_at: Utc::now() + Duration::hours(1),
+        };
+        let store = Arc::new(RecordingStore::default());
+        let client = make_client(&server, tokens, store);
+
+        let response = client
+            .send_message("encoded-message", Some("thread-abc".into()))
+            .await
+            .expect("send_message succeeds");
+
+        assert_eq!(response.id, "sent-123");
+        assert_eq!(response.thread_id, "thread-abc");
+        assert_eq!(response.label_ids, vec!["SENT"]);
+    }
+
+    #[tokio::test]
+    async fn send_message_omits_thread_id_when_none() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/gmail/v1/users/me/messages/send"))
+            .and(body_json(json!({
+                "raw": "encoded-message"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "sent-234",
+                "threadId": "thread-new",
+                "labelIds": ["SENT", "INBOX"]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let tokens = OAuthTokens {
+            access_token: "token".into(),
+            refresh_token: "refresh".into(),
+            expires_at: Utc::now() + Duration::hours(1),
+        };
+        let store = Arc::new(RecordingStore::default());
+        let client = make_client(&server, tokens, store);
+
+        let response = client
+            .send_message("encoded-message", None)
+            .await
+            .expect("send_message succeeds");
+
+        assert_eq!(response.id, "sent-234");
+        assert_eq!(response.thread_id, "thread-new");
+        assert_eq!(response.label_ids, vec!["SENT", "INBOX"]);
     }
 }

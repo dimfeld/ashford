@@ -6,7 +6,7 @@ goal: Implement forward/auto-reply actions via outbound.send job with MIME
 id: 24
 uuid: e3c7d618-82e3-4835-9f9c-441d596c2fc1
 generatedBy: agent
-status: in_progress
+status: done
 priority: medium
 container: false
 temp: false
@@ -24,50 +24,160 @@ docs:
 planGeneratedAt: 2025-12-03T02:21:59.017Z
 promptsGeneratedAt: 2025-12-03T02:21:59.017Z
 createdAt: 2025-12-03T02:21:14.787Z
-updatedAt: 2025-12-04T21:32:32.753Z
-progressNotes: []
+updatedAt: 2025-12-05T09:05:54.937Z
+progressNotes:
+  - timestamp: 2025-12-04T21:51:53.926Z
+    text: Implemented Gmail send_message API client, MIME builder utility, and
+      outbound.send job with send + completion handling; added unit test for
+      MIME builder and integration-style test for outbound send using mock
+      Gmail.
+    source: "implementer: Tasks1-3-6-7"
+  - timestamp: 2025-12-04T21:58:32.544Z
+    text: Expanded outbound.send coverage (thread lookup fallback, forward
+      attachments, invalid attachments). Fixed handler to mark actions failed on
+      attachment decode errors. All ashford-core tests passing.
+    source: "tester: outbound email"
+  - timestamp: 2025-12-04T22:25:27.109Z
+    text: Implemented forward/auto_reply branches in action_gmail to enqueue
+      outbound.send with MIME-ready payloads. Added inline/attachment body
+      builders, thread lookup for replies, idempotent enqueue, and tests
+      covering forward/auto-reply enqueue behavior and action status staying
+      Executing. cargo test -p ashford-core action_gmail passing.
+    source: "implementer: Tasks4-5"
+  - timestamp: 2025-12-04T22:30:09.215Z
+    text: Added missing forward attachment and auto-reply recipient validation
+      tests; verified action_gmail suite green.
+    source: "tester: outbound email"
+  - timestamp: 2025-12-05T05:55:34.791Z
+    text: "Completed thorough code review. All 7 tasks implemented: send_message
+      method added to GmailClient, MimeMessage builder created with mail-builder
+      dependency, outbound.send job handler implemented, forward and auto_reply
+      actions enqueue correctly leaving actions in Executing, threading headers
+      omitted for forwards. Tests cover main paths. Found one minor issue with
+      references payload handling for auto_reply actions."
+    source: "reviewer: Gmail Outbound Email"
+  - timestamp: 2025-12-05T08:21:13.779Z
+    text: "Addressed review issues: added idempotent sent-metadata persistence to
+      outbound.send and action type validation; added regression test to ensure
+      retries don't resend."
+    source: "implementer: outbound.send"
+  - timestamp: 2025-12-05T08:22:31.008Z
+    text: "Ran cargo test -p ashford-core jobs::outbound_send::tests and
+      action_gmail:: suite; all current tests passing."
+    source: "tester: outbound.send verification"
+  - timestamp: 2025-12-05T08:23:22.960Z
+    text: Added regression test for action type mismatch to ensure outbound.send
+      refuses mismatched actions without calling Gmail; reran cargo test -p
+      ashford-core jobs::outbound_send::tests (all green).
+    source: "tester: outbound.send verification"
+  - timestamp: 2025-12-05T08:26:24.000Z
+    text: "Found remaining issues: outbound.send will resend on retry if undo-hint
+      update DB write fails; existing-sent retry path still loads original
+      message and can fail if message missing."
+    source: "reviewer: outbound.send"
+  - timestamp: 2025-12-05T08:59:31.617Z
+    text: Addressed three code duplication issues from review. 1) Consolidated Gmail
+      client creation by renaming create_gmail_client to
+      create_gmail_client_with_account (returns Account + client), added
+      convenience wrapper create_gmail_client, removed duplicate
+      load_account_and_client from outbound_send.rs. 2) Made
+      normalize_message_id public in mime_builder.rs and removed duplicate from
+      outbound_send.rs. 3) Added new dedup_message_ids function in
+      mime_builder.rs, refactored combined_references to use it, replaced
+      dedup_ids calls in outbound_send.rs with dedup_message_ids. All
+      outbound_send and mime_builder tests pass.
+    source: "implementer: code review fixes"
+  - timestamp: 2025-12-05T09:03:06.069Z
+    text: "Verified test coverage for the three code deduplication fixes. Found that
+      normalize_message_id and dedup_message_ids in mime_builder.rs had no
+      dedicated unit tests. Added 6 new tests:
+      normalize_message_id_strips_brackets_and_whitespace,
+      normalize_message_id_returns_none_for_empty,
+      dedup_message_ids_removes_duplicates_preserving_order,
+      dedup_message_ids_normalizes_before_deduplicating,
+      dedup_message_ids_filters_empty_ids,
+      dedup_message_ids_handles_empty_input. All 578 tests in ashford-core pass.
+      Two pre-existing flaky tests
+      (queue::tests::concurrent_claim_allows_single_runner and
+      worker_executes_archive_action_and_populates_undo_hint) occasionally fail
+      when running full suite but pass individually - these are unrelated to the
+      Plan 24 changes."
+    source: "tester: test coverage verification"
+  - timestamp: 2025-12-05T09:05:31.488Z
+    text: "Verified all three duplication issues are properly fixed: (1)
+      create_gmail_client duplicates replaced with
+      create_gmail_client_with_account in action_gmail.rs, (2) dedup_ids
+      replaced with dedup_message_ids from mime_builder, (3)
+      normalize_message_id made public in mime_builder and reused in
+      outbound_send. All 578 tests pass. The module dependency from
+      outbound_send to action_gmail is consistent with existing patterns (e.g.,
+      unsnooze_gmail also imports from action_gmail)."
+    source: "reviewer: autofix review"
+  - timestamp: 2025-12-05T09:05:54.931Z
+    text: "Completed autofix for code review issues. All 3 duplication issues
+      resolved: (1) Gmail client creation consolidated to action_gmail.rs, (2)
+      dedup_message_ids extracted to mime_builder.rs, (3) normalize_message_id
+      made public in mime_builder.rs. Added 6 new unit tests. All 578 tests
+      pass. Reviewer approved with ACCEPTABLE verdict."
+    source: "orchestrator: autofix"
 tasks:
   - title: Add send_message method to GmailClient
-    done: false
+    done: true
     description: Implement GmailClient::send_message(raw_message) calling POST
       /messages/send with base64url-encoded RFC 2822 message. Add
       SendMessageRequest and SendMessageResponse types.
   - title: Create MIME message builder
-    done: false
+    done: true
     description: "Add mail-builder crate dependency. Create MimeBuilder wrapper
       utility for constructing RFC 2822 email messages. Support: To/From/Subject
       headers, plain text and HTML body, In-Reply-To and References headers for
       threading, attachments. Output base64url-encoded string for Gmail API."
   - title: Create outbound.send job type
-    done: false
+    done: true
     description: "Create new job type 'outbound.send' with handler in
       jobs/outbound_send.rs. Payload: {account_id, action_id, message_type:
       'forward'|'reply', to, subject, body, original_message_id, attachments}.
       Export JOB_TYPE_OUTBOUND_SEND constant."
   - title: Implement forward action
-    done: false
+    done: true
     description: "In action_gmail, implement forward: extract recipients and
       optional note from parameters. Enqueue outbound.send job with
       message_type='forward'. Keep action in Executing status (job will mark
       completed). Include original message body (inline or as attachment based
       on config)."
   - title: Implement auto_reply action
-    done: false
+    done: true
     description: "Implement auto_reply: extract reply content from parameters (may
       be LLM-generated). Enqueue outbound.send job with message_type='reply'.
       Keep action in Executing status. Set proper threading headers to keep in
       same thread."
   - title: Implement outbound.send job handler
-    done: false
+    done: true
     description: "Implement handle_outbound_send: build MIME message using
       MimeBuilder, call send_message API. Mark the original action as Completed
       with irreversible undo hint, or Failed on error. Store sent message ID in
       action result for reference."
   - title: Add tests for outbound email
-    done: false
+    done: true
     description: Add tests for MimeBuilder (headers, body, attachments, threading).
       Add integration tests for outbound.send job with mocked Gmail API. Verify
       correct MIME structure.
+changedFiles:
+  - docs/gmail_integration.md
+  - docs/job_queue.md
+  - server/Cargo.lock
+  - server/crates/ashford-core/Cargo.toml
+  - server/crates/ashford-core/src/gmail/client.rs
+  - server/crates/ashford-core/src/gmail/mime_builder.rs
+  - server/crates/ashford-core/src/gmail/mod.rs
+  - server/crates/ashford-core/src/gmail/types.rs
+  - server/crates/ashford-core/src/jobs/action_gmail.rs
+  - server/crates/ashford-core/src/jobs/mod.rs
+  - server/crates/ashford-core/src/jobs/outbound_send.rs
+  - server/crates/ashford-core/src/jobs/unsnooze_gmail.rs
+  - server/crates/ashford-core/src/threads.rs
+  - server/crates/ashford-core/tests/export_ts_types.rs
+  - web/src/lib/types/generated/LogicalCondition.ts
 tags:
   - actions
   - gmail
@@ -415,3 +525,19 @@ Expected parameters from decision:
    - Tests require wiremock for Gmail API mocking (already in dev-dependencies)
    - MIME output testing needs careful assertion on structure
    - Consider recording real API responses for test fixtures
+
+# Implementation Notes
+
+Implemented Gmail outbound send infrastructure. Added mail-builder dependency and new Gmail types for send_message plus GmailClient::send_message with wiremock coverage (server/crates/ashford-core/src/gmail/types.rs, client.rs). Introduced gmail/mime_builder.rs providing EmailAddress/MimeMessage and attachment support with threading headers and base64url output, along with unit tests. Registered new outbound.send job (jobs/outbound_send.rs) and constant in jobs/mod.rs: parses payload, loads action/message/thread (new ThreadRepository::get_by_id), builds MIME via MimeMessage, decodes attachments, uses refreshed Gmail client to POST messages, then marks actions completed with irreversible undo hints or failed on fatal errors. Added outbound send test using mock Gmail to verify encoded payload and action completion. ThreadRepository gained get_by_id helper; cargo fmt touched unsnooze_gmail.rs test and export_ts_types.rs formatting only.
+
+Wrapped outbound send pre-flight (account/message ownership checks, message/thread lookup, attachment decode, MIME build, Gmail send) into the result flow so fatal errors now reach the final match and mark_failed path; moved the action/account validation there to avoid actions getting stuck executing when validation fails. Forward handling now explicitly skips threadId resolution and threading headers: build_thread_headers returns empty data for Forward, references from payload are only applied for Reply, and send_message is called with None so Gmail delivers forwards as new conversations. Updated server/crates/ashford-core/src/jobs/outbound_send.rs forward test to assert threadId and References/In-Reply-To are absent while keeping attachment coverage; reran cargo test -p ashford-core jobs::outbound_send::tests to verify. Tasks: fix forward threading, ensure fatal pre-send errors mark actions failed, and add test coverage to catch threading regressions.
+
+Implemented Tasks 4 and 5 (forward and auto_reply actions) by adding enqueue paths inside action_gmail. Introduced recipient parsing, body builders, and HTML escaping helpers plus an idempotent enqueue_outbound_send helper and thread lookup for replies in server/crates/ashford-core/src/jobs/action_gmail.rs. Forward actions now build inline forwarded content (including minimal header summary) or attach an eml copy of the original when include_original=attachment, set a sensible Fwd: subject, and enqueue outbound.send without completing the action. Auto-reply actions derive recipients (defaulting to the original sender), generate Re: subjects, honor body/body_html parameters, include threading info via provider thread id lookup, and enqueue outbound.send leaving the action in Executing. Added tests in action_gmail action_handler_tests to assert forward/auto-reply enqueue behavior, payload contents, and that actions stay Executing; kept build/test coverage with cargo test -p ashford-core action_gmail. These changes keep undo hints unchanged (handled by outbound.send) and rely on outbound.send to mark completion after successful send.
+
+Handled reviewer fixes for Gmail forward/auto_reply actions. execute_forward now creates a Gmail client to fetch the original message, downloads attachment bodies via attachments.get, and includes them when forwarding inline. Forward-as-attachment now attaches the true raw RFC 822 from Gmail (message/rfc822) instead of a fabricated stub, preserving original headers and attachments. Added header lookup helper and Reply-To preference in execute_auto_reply, falling back to From only when Reply-To is absent. Updated tests in action_gmail action_handler suite to mock Gmail endpoints, verify forwarded attachments (both inline and .eml) and ensure auto-reply targets Reply-To. Touched files: server/crates/ashford-core/src/jobs/action_gmail.rs, server/crates/ashford-core/src/gmail/client.rs, server/crates/ashford-core/src/gmail/types.rs. Added new Gmail client APIs get_message_raw/get_attachment and MessageAttachment type. Ran cargo test --manifest-path server/crates/ashford-core/Cargo.toml jobs::action_gmail::tests::action_handler_tests -- --nocapture successfully.
+
+Implemented review fixes for outbound email idempotency and safety. Added ActionRepository::update_undo_hint (server/crates/ashford-core/src/decisions/repositories.rs) with a dedicated test to persist undo_hint_json without changing status, allowing outbound jobs to stash irreversible send metadata mid-execution. In outbound.send handler (server/crates/ashford-core/src/jobs/outbound_send.rs), introduced action type validation so only forward/auto_reply actions may be executed, and added sent-metadata detection/persistence to prevent retries from resending after a successful Gmail call—on success we now store sent_message_id/thread_id in undo_hint_json before completion, and retries reuse that metadata to finalize the action without another send. Added helper functions for expected action type, send undo hint construction, and persisted send metadata; logging now uses stored message IDs. A new regression test verifies that existing sent metadata skips the Gmail send while still completing the action, and cargo tests confirm behavior. These changes directly address the critical duplicate-send risk and the missing action-type guard while preserving the plan’s irreversible completion semantics.
+
+Implemented safeguards in outbound.send to eliminate duplicate sends when post-send persistence fails by making undo-hint writes fatal/non-retryable after a successful Gmail send while keeping retryable writes for the already-sent fast path. Reordered the existing-sent short-circuit to run before message/thread lookups so retries with stored sent metadata skip DB fetches and cannot fail fatally if the source message is missing or moved. Extended regression coverage with a test that enqueues a retry using stored sent metadata and a missing original_message_id payload to ensure Gmail is not called and the action completes using persisted ids. Updated persist_send_hint to accept a retryable_on_failure flag and adjusted call sites accordingly. Files modified: server/crates/ashford-core/src/jobs/outbound_send.rs. Tasks: Issue 1 – prevent outbound.send duplicate resend; Issue 2 – enforce outbound.send action type resilience on retries.
+
+Autofix: Resolved three code duplication issues identified in code review. Issue 1 (duplicate Gmail client creation): Renamed create_gmail_client to create_gmail_client_with_account in action_gmail.rs to return both Account and GmailClient tuple, added a convenience wrapper create_gmail_client that returns only the client, removed duplicate load_account_and_client from outbound_send.rs, and updated outbound_send.rs to import create_gmail_client_with_account from action_gmail. Issue 2 (duplicate dedup_ids logic): Added new public dedup_message_ids function in mime_builder.rs that normalizes message IDs before deduplication, refactored combined_references to use dedup_message_ids, removed dedup_ids from outbound_send.rs, and updated imports. Issue 3 (duplicate normalize_message_id): Made normalize_message_id public in mime_builder.rs with proper documentation and removed the duplicate from outbound_send.rs. Files modified: server/crates/ashford-core/src/jobs/action_gmail.rs, server/crates/ashford-core/src/jobs/outbound_send.rs, server/crates/ashford-core/src/gmail/mime_builder.rs. Added 6 new unit tests for the refactored public functions (4 for dedup_message_ids, 2 for normalize_message_id). All 578 tests pass.

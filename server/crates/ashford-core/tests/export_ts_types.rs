@@ -59,8 +59,8 @@ fn export_typescript_types() {
 /// Specifically, this adds missing imports for types referenced in `#[ts(type = "...")]`
 /// annotations, which ts-rs doesn't handle automatically.
 fn post_process_generated_types() {
-    let export_dir =
-        std::env::var("TS_RS_EXPORT_DIR").unwrap_or_else(|_| "../web/src/lib/types/generated".into());
+    let export_dir = std::env::var("TS_RS_EXPORT_DIR")
+        .unwrap_or_else(|_| "../web/src/lib/types/generated".into());
     let export_path = Path::new(&export_dir);
 
     // Fix LogicalCondition.ts - add missing LeafCondition import

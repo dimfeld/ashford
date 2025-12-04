@@ -3,4 +3,4 @@
 /**
  * Color information for a label.
  */
-export type LabelColors = { background_color: string | null; text_color: string | null };
+export type LabelColors = { background_color: string | null, text_color: string | null, };

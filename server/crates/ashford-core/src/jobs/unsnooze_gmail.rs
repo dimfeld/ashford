@@ -390,14 +390,12 @@ mod tests {
                 "addLabelIds": ["INBOX"],
                 "removeLabelIds": ["Label_Snoozed"]
             })))
-            .respond_with(
-                ResponseTemplate::new(400).set_body_json(json!({
-                    "error": {
-                        "code": 400,
-                        "message": "Label not found: Label_Snoozed"
-                    }
-                })),
-            )
+            .respond_with(ResponseTemplate::new(400).set_body_json(json!({
+                "error": {
+                    "code": 400,
+                    "message": "Label not found: Label_Snoozed"
+                }
+            })))
             .expect(1)
             .mount(&server)
             .await;

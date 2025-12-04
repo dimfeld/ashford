@@ -96,6 +96,7 @@ Job type constants are defined in `server/crates/ashford-core/src/jobs/mod.rs`:
 - `JOB_TYPE_HISTORY_SYNC_GMAIL` = "history.sync.gmail"
 - `JOB_TYPE_BACKFILL_GMAIL` = "backfill.gmail"
 - `JOB_TYPE_LABELS_SYNC_GMAIL` = "labels.sync.gmail"
+- `JOB_TYPE_OUTBOUND_SEND` = "outbound.send"
 
 ### 5.3.1 Scheduled Jobs
 
@@ -241,6 +242,8 @@ The action.gmail job executes Gmail mutations based on action records created by
 | `restore` | `untrash_message` | Restore from trash |
 | `delete` | `delete_message` | Permanently delete (irreversible) |
 | `snooze` | `modify_message` + schedule job | Archive and schedule unsnooze |
+| `forward` | Enqueues `outbound.send` job | Forward message (irreversible) |
+| `auto_reply` | Enqueues `outbound.send` job | Send reply (irreversible) |
 
 **Parameter Validation**:
 - `apply_label` and `remove_label` require a non-empty `label` field in `parameters_json`
@@ -296,4 +299,88 @@ The unsnooze.gmail job restores snoozed messages to the inbox at the scheduled t
 **Idempotency key**: `unsnooze.gmail:{account_id}:{action_id}`
 
 The unsnooze job is scheduled by the snooze action with `not_before` set to the snooze target time. It runs as a consequence of snoozing, not as a user-initiated undo operation.
+
+### 5.9 Outbound Send Job
+
+The outbound.send job sends emails for forward and auto_reply actions. It constructs RFC 2822 MIME messages and sends them via the Gmail API.
+
+**Payload**:
+```json
+{
+  "account_id": "uuid",
+  "action_id": "uuid",
+  "message_type": "forward" | "reply",
+  "to": ["recipient@example.com"],
+  "cc": ["cc@example.com"],
+  "subject": "Re: Original Subject",
+  "body_plain": "Plain text body",
+  "body_html": "<p>HTML body</p>",
+  "original_message_id": "uuid",
+  "thread_id": "gmail_thread_id",
+  "references": ["<message-id@domain.com>"],
+  "attachments": [
+    {
+      "filename": "document.pdf",
+      "mime_type": "application/pdf",
+      "data": "base64-encoded-content"
+    }
+  ]
+}
+```
+
+**Flow**:
+1. Parse payload and validate action/account ownership
+2. Load original message and thread from database
+3. Build MIME message using `MimeMessage` builder:
+   - Set From/To/CC/Subject headers
+   - For replies: add `In-Reply-To` and `References` headers for threading
+   - For forwards: omit threading headers (sends as new conversation)
+   - Add plain text and/or HTML body parts
+   - Decode and attach any attachments
+4. Call Gmail `send_message` API with base64url-encoded RFC 2822 message
+5. On success: mark action as `Completed` with irreversible undo hint containing `sent_message_id`
+6. On failure: mark action as `Failed` with error message
+
+**Message Type Differences**:
+
+| Type | Threading | Headers | Gmail Thread |
+|------|-----------|---------|--------------|
+| `reply` | Maintains thread | Includes In-Reply-To, References | Uses original threadId |
+| `forward` | New conversation | No threading headers | No threadId (new thread) |
+
+**MIME Message Construction**:
+The `MimeMessage` struct (in `server/crates/ashford-core/src/gmail/mime_builder.rs`) uses the `mail-builder` crate:
+
+```rust
+let message = MimeMessage::new()
+    .from(EmailAddress::new("sender@example.com", Some("Sender Name")))
+    .to(EmailAddress::new("recipient@example.com", None))
+    .subject("Re: Original Subject")
+    .body_plain("Plain text content")
+    .body_html("<p>HTML content</p>")
+    .in_reply_to("<original-message-id@gmail.com>")
+    .references("<thread-references@gmail.com>")
+    .attachment("document.pdf", "application/pdf", file_bytes);
+
+let raw_message = message.to_base64url()?;
+```
+
+**Undo Hints**:
+Forward and auto_reply actions are irreversible. The undo hint indicates this:
+```json
+{
+  "action": "forward",
+  "inverse_action": "none",
+  "irreversible": true,
+  "sent_message_id": "1234567890abcdef"
+}
+```
+
+**Error Handling**:
+- Invalid payload → Fatal error (missing required fields)
+- Message/action not found → Fatal error
+- Account mismatch → Fatal error
+- Gmail API errors → Mapped via `map_gmail_error()` (see Error Handling section)
+
+**Idempotency key**: `outbound.send:{account_id}:{action_id}`
 

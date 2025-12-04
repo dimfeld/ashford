@@ -491,6 +491,40 @@ impl ActionRepository {
         .await
     }
 
+    /// Updates only the undo_hint_json field while preserving status.
+    ///
+    /// This is useful for persisting irreversible metadata during execution so retries
+    /// can remain idempotent (e.g., outbound sends that must not resend on retry).
+    pub async fn update_undo_hint(
+        &self,
+        org_id: i64,
+        user_id: i64,
+        id: &str,
+        undo_hint: serde_json::Value,
+    ) -> Result<Action, ActionError> {
+        let now = now_rfc3339();
+        let undo_hint_json = serde_json::to_string(&undo_hint)?;
+
+        let conn = self.db.connection().await?;
+        let mut rows = conn
+            .query(
+                &format!(
+                    "UPDATE actions
+                     SET undo_hint_json = ?1,
+                         updated_at = ?2
+                     WHERE id = ?3 AND org_id = ?4 AND user_id = ?5
+                     RETURNING {ACTION_COLUMNS}"
+                ),
+                params![undo_hint_json, now, id, org_id, user_id],
+            )
+            .await?;
+
+        match rows.next().await? {
+            Some(row) => row_to_action(row),
+            None => Err(ActionError::NotFound(id.to_string())),
+        }
+    }
+
     /// Mark an action as completed and store the undo hint atomically.
     ///
     /// This combines the status update with the undo_hint_json update in a single
@@ -1271,6 +1305,39 @@ mod tests {
         assert_eq!(failed.status, ActionStatus::Failed);
         assert_eq!(failed.error_message.as_deref(), Some("boom"));
         assert!(failed.executed_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn action_update_undo_hint_preserves_status() {
+        let (db, _dir) = setup_db().await;
+        let account_id = seed_account(&db).await;
+        let thread_id = seed_thread(&db, &account_id, "t1").await;
+        let message_id = seed_message(&db, &account_id, &thread_id, "m1").await;
+        let decisions = DecisionRepository::new(db.clone());
+        let decision = decisions
+            .create(sample_new_decision(&account_id, &message_id))
+            .await
+            .expect("decision");
+        let repo = ActionRepository::new(db);
+
+        let created = repo
+            .create(sample_new_action(
+                &account_id,
+                &message_id,
+                Some(&decision.id),
+                ActionStatus::Executing,
+            ))
+            .await
+            .expect("create");
+
+        let hint = serde_json::json!({"sent_message_id": "123"});
+        let updated = repo
+            .update_undo_hint(DEFAULT_ORG_ID, DEFAULT_USER_ID, &created.id, hint.clone())
+            .await
+            .expect("update hint");
+
+        assert_eq!(updated.status, ActionStatus::Executing);
+        assert_eq!(updated.undo_hint_json, hint);
     }
 
     #[tokio::test]

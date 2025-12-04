@@ -3,10 +3,4 @@
 /**
  * Generic pagination wrapper for API list responses.
  */
-export type PaginatedResponse<T> = {
-	items: Array<T>;
-	total: number;
-	limit: number;
-	offset: number;
-	has_more: boolean;
-};
+export type PaginatedResponse<T> = { items: Array<T>, total: number, limit: number, offset: number, has_more: boolean, };

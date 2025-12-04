@@ -5,18 +5,21 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use tracing::info;
 
-use crate::accounts::AccountRepository;
+use crate::accounts::{Account, AccountRepository};
 use crate::constants::{DEFAULT_ORG_ID, DEFAULT_USER_ID};
 use crate::decisions::{Action, ActionRepository, ActionStatus};
+use crate::gmail::types::{Header, MessagePart};
 use crate::gmail::{GmailClient, GmailClientError, NoopTokenStore};
 use crate::labels::{LabelError, LabelRepository, NewLabel};
 use crate::llm::decision::ActionType;
-use crate::messages::{Message, MessageRepository};
+use crate::messages::{Mailbox, Message, MessageRepository};
 use crate::queue::{JobQueue, QueueError};
+use crate::threads::{ThreadError, ThreadRepository};
 use crate::{Job, JobError};
 
 use super::{
-    JOB_TYPE_UNSNOOZE_GMAIL, JobDispatcher, map_account_error, map_action_error, map_gmail_error,
+    JOB_TYPE_OUTBOUND_SEND, JOB_TYPE_UNSNOOZE_GMAIL, JobDispatcher, map_account_error,
+    map_action_error, map_gmail_error,
 };
 
 pub const JOB_TYPE: &str = "action.gmail";
@@ -27,7 +30,7 @@ struct ActionJobPayload {
     pub action_id: String,
 }
 
-/// Creates a GmailClient for executing Gmail actions.
+/// Creates a GmailClient and returns the associated Account for executing Gmail actions.
 ///
 /// This follows the same pattern used in ingest_gmail.rs:
 /// 1. Refresh account tokens if needed via AccountRepository
@@ -39,11 +42,11 @@ struct ActionJobPayload {
 /// * `account_id` - The account ID to create the client for
 ///
 /// # Returns
-/// A configured GmailClient ready for API calls, or a JobError if token refresh fails
-pub async fn create_gmail_client(
+/// A tuple of (Account, GmailClient) ready for API calls, or a JobError if token refresh fails
+pub async fn create_gmail_client_with_account(
     dispatcher: &JobDispatcher,
     account_id: &str,
-) -> Result<GmailClient<NoopTokenStore>, JobError> {
+) -> Result<(Account, GmailClient<NoopTokenStore>), JobError> {
     let account_repo = AccountRepository::new(dispatcher.db.clone());
     let account = account_repo
         .refresh_tokens_if_needed(
@@ -55,7 +58,7 @@ pub async fn create_gmail_client(
         .await
         .map_err(|err| map_account_error("refresh account tokens", err))?;
 
-    Ok(GmailClient::new(
+    let client = GmailClient::new(
         dispatcher.http.clone(),
         account.email.clone(),
         account.config.client_id.clone(),
@@ -68,7 +71,28 @@ pub async fn create_gmail_client(
             .gmail_api_base
             .clone()
             .unwrap_or_else(|| "https://gmail.googleapis.com/gmail/v1/users".to_string()),
-    ))
+    );
+
+    Ok((account, client))
+}
+
+/// Creates a GmailClient for executing Gmail actions.
+///
+/// This is a convenience wrapper around `create_gmail_client_with_account` that
+/// discards the account and only returns the client.
+///
+/// # Arguments
+/// * `dispatcher` - The job dispatcher providing HTTP client and config
+/// * `account_id` - The account ID to create the client for
+///
+/// # Returns
+/// A configured GmailClient ready for API calls, or a JobError if token refresh fails
+pub async fn create_gmail_client(
+    dispatcher: &JobDispatcher,
+    account_id: &str,
+) -> Result<GmailClient<NoopTokenStore>, JobError> {
+    let (_account, client) = create_gmail_client_with_account(dispatcher, account_id).await?;
+    Ok(client)
 }
 
 /// Pre-image state captured before executing an action.
@@ -123,6 +147,311 @@ impl PreImageState {
             "inverse_action": inverse_action.as_str(),
             "inverse_parameters": inverse_parameters
         })
+    }
+}
+
+fn parse_recipients(parameters: &Value, field: &str) -> Result<Vec<String>, JobError> {
+    match parameters.get(field) {
+        None => Ok(Vec::new()),
+        Some(Value::String(s)) => Ok(if s.trim().is_empty() {
+            Vec::new()
+        } else {
+            vec![s.trim().to_string()]
+        }),
+        Some(Value::Array(values)) => {
+            let mut recipients = Vec::new();
+            for v in values {
+                if let Some(s) = v.as_str() {
+                    let trimmed = s.trim();
+                    if !trimmed.is_empty() {
+                        recipients.push(trimmed.to_string());
+                    }
+                } else {
+                    return Err(JobError::Fatal(format!("{field} entries must be strings")));
+                }
+            }
+            Ok(recipients)
+        }
+        _ => Err(JobError::Fatal(format!(
+            "{field} must be a string or array of strings"
+        ))),
+    }
+}
+
+fn html_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+fn header_value_case_insensitive(headers: &[Header], name: &str) -> Option<String> {
+    headers
+        .iter()
+        .find(|h| h.name.eq_ignore_ascii_case(name))
+        .map(|h| h.value.clone())
+}
+
+/// Finds and returns all attachments from a Gmail message payload, downloading bodies as needed.
+async fn collect_attachments(
+    gmail_client: &GmailClient<NoopTokenStore>,
+    message_id: &str,
+    payload: Option<&MessagePart>,
+) -> Result<Vec<Value>, JobError> {
+    let mut attachments = Vec::new();
+    let mut stack: Vec<&MessagePart> = Vec::new();
+    if let Some(root) = payload {
+        stack.push(root);
+    }
+
+    while let Some(part) = stack.pop() {
+        stack.extend(part.parts.iter());
+
+        let has_filename = part
+            .filename
+            .as_ref()
+            .map(|f| !f.is_empty())
+            .unwrap_or(false);
+        let attachment_id = part.body.as_ref().and_then(|b| b.attachment_id.as_deref());
+        if !has_filename && attachment_id.is_none() {
+            continue;
+        }
+
+        let content_type = part
+            .mime_type
+            .clone()
+            .unwrap_or_else(|| "application/octet-stream".to_string());
+        let filename = part
+            .filename
+            .clone()
+            .filter(|f| !f.is_empty())
+            .unwrap_or_else(|| "attachment".to_string());
+
+        let data_base64 =
+            if let Some(data) = part.body.as_ref().and_then(|b| b.data.as_ref()).cloned() {
+                data
+            } else if let Some(id) = attachment_id {
+                gmail_client
+                    .get_attachment(message_id, id)
+                    .await
+                    .map_err(|err| map_gmail_error("get attachment", err))?
+                    .data
+            } else {
+                continue;
+            };
+
+        attachments.push(json!({
+            "filename": filename,
+            "content_type": content_type,
+            "data_base64": data_base64
+        }));
+    }
+
+    Ok(attachments)
+}
+
+fn format_mailbox(mailbox: &Mailbox) -> String {
+    match mailbox.name.as_ref() {
+        Some(name) if !name.is_empty() => format!("{} <{}>", name, mailbox.email),
+        _ => mailbox.email.clone(),
+    }
+}
+
+fn format_mailbox_list(list: &[Mailbox]) -> Option<String> {
+    if list.is_empty() {
+        None
+    } else {
+        Some(
+            list.iter()
+                .map(format_mailbox)
+                .collect::<Vec<_>>()
+                .join(", "),
+        )
+    }
+}
+
+fn forward_subject(message: &Message, explicit: Option<String>) -> Option<String> {
+    if explicit.is_some() {
+        return explicit;
+    }
+
+    message.subject.as_ref().map(|subject| {
+        let lower = subject.to_ascii_lowercase();
+        if lower.starts_with("fwd:") || lower.starts_with("fw:") {
+            subject.clone()
+        } else {
+            format!("Fwd: {subject}")
+        }
+    })
+}
+
+fn reply_subject(message: &Message, explicit: Option<String>) -> Option<String> {
+    if explicit.is_some() {
+        return explicit;
+    }
+
+    message.subject.as_ref().map(|subject| {
+        let lower = subject.to_ascii_lowercase();
+        if lower.starts_with("re:") {
+            subject.clone()
+        } else {
+            format!("Re: {subject}")
+        }
+    })
+}
+
+fn build_forward_inline_body(
+    note: Option<String>,
+    message: &Message,
+) -> Result<(Option<String>, Option<String>, Vec<Value>), JobError> {
+    let mut body_plain = String::new();
+    let mut body_html = String::new();
+
+    if let Some(note) = note.as_ref() {
+        if !note.is_empty() {
+            body_plain.push_str(note);
+            body_plain.push_str("\n\n");
+            body_html.push_str(&format!("<p>{}</p>", html_escape(note)));
+        }
+    }
+
+    let mut header_lines = vec!["---------- Forwarded message ----------".to_string()];
+    if let Some(from_email) = message.from_email.as_ref() {
+        let from = match message.from_name.as_ref() {
+            Some(name) if !name.is_empty() => format!("{name} <{from_email}>"),
+            _ => from_email.to_string(),
+        };
+        header_lines.push(format!("From: {from}"));
+        body_html.push_str(&format!(
+            "<p><strong>From:</strong> {}</p>",
+            html_escape(&from)
+        ));
+    }
+
+    if let Some(date) = message.received_at {
+        let formatted = date.to_rfc3339();
+        header_lines.push(format!("Date: {formatted}"));
+        body_html.push_str(&format!("<p><strong>Date:</strong> {formatted}</p>"));
+    }
+
+    if let Some(subject) = message.subject.as_ref() {
+        header_lines.push(format!("Subject: {subject}"));
+        body_html.push_str(&format!(
+            "<p><strong>Subject:</strong> {}</p>",
+            html_escape(subject)
+        ));
+    }
+
+    if let Some(to_line) = format_mailbox_list(&message.to) {
+        header_lines.push(format!("To: {to_line}"));
+        body_html.push_str(&format!(
+            "<p><strong>To:</strong> {}</p>",
+            html_escape(&to_line)
+        ));
+    }
+
+    if let Some(cc_line) = format_mailbox_list(&message.cc) {
+        header_lines.push(format!("Cc: {cc_line}"));
+        body_html.push_str(&format!(
+            "<p><strong>Cc:</strong> {}</p>",
+            html_escape(&cc_line)
+        ));
+    }
+
+    let mut forwarded_plain = header_lines.join("\n");
+    forwarded_plain.push_str("\n\n");
+
+    if let Some(original_plain) = message.body_plain.as_ref() {
+        forwarded_plain.push_str(original_plain);
+        body_html.push_str("<hr><blockquote>");
+        body_html.push_str(&html_escape(original_plain));
+        body_html.push_str("</blockquote>");
+    } else if let Some(original_html) = message.body_html.as_ref() {
+        forwarded_plain.push_str(
+            message
+                .snippet
+                .as_deref()
+                .unwrap_or("<no content available>"),
+        );
+        body_html.push_str("<hr><blockquote>");
+        body_html.push_str(original_html);
+        body_html.push_str("</blockquote>");
+    } else if let Some(snippet) = message.snippet.as_ref() {
+        forwarded_plain.push_str(snippet);
+        body_html.push_str("<hr><blockquote>");
+        body_html.push_str(&html_escape(snippet));
+        body_html.push_str("</blockquote>");
+    } else {
+        forwarded_plain.push_str("<no content available>");
+        body_html.push_str("<hr><blockquote><p>&nbsp;</p></blockquote>");
+    }
+
+    body_plain.push_str(&forwarded_plain);
+
+    Ok((Some(body_plain), Some(body_html), Vec::new()))
+}
+
+fn build_forward_attachment_body(
+    note: Option<String>,
+    raw_base64: &str,
+) -> Result<(Option<String>, Option<String>, Vec<Value>), JobError> {
+    let mut body_plain = note.unwrap_or_else(|| "Forwarded message attached.".to_string());
+    if body_plain.is_empty() {
+        body_plain = "Forwarded message attached.".to_string();
+    }
+
+    let body_html = Some(format!("<p>{}</p>", html_escape(&body_plain)));
+
+    let attachments = vec![json!({
+        "filename": "forwarded.eml",
+        "content_type": "message/rfc822",
+        "data_base64": raw_base64
+    })];
+
+    Ok((Some(body_plain), body_html, attachments))
+}
+
+async fn enqueue_outbound_send(
+    dispatcher: &JobDispatcher,
+    action: &Action,
+    payload: Value,
+) -> Result<(), JobError> {
+    let queue = JobQueue::new(dispatcher.db.clone());
+    let idempotency_key = format!("outbound.send:{}", action.id);
+
+    match queue
+        .enqueue(JOB_TYPE_OUTBOUND_SEND, payload, Some(idempotency_key), 0)
+        .await
+    {
+        Ok(_) => Ok(()),
+        Err(QueueError::DuplicateIdempotency { .. }) => Ok(()),
+        Err(err) => Err(JobError::retryable(format!("enqueue outbound.send: {err}"))),
+    }
+}
+
+async fn lookup_provider_thread_id(
+    dispatcher: &JobDispatcher,
+    thread_id: &str,
+) -> Result<Option<String>, JobError> {
+    let thread_repo = ThreadRepository::new(dispatcher.db.clone());
+    match thread_repo
+        .get_by_id(DEFAULT_ORG_ID, DEFAULT_USER_ID, thread_id)
+        .await
+    {
+        Ok(thread) => Ok(Some(thread.provider_thread_id)),
+        Err(ThreadError::NotFound(_)) => Ok(None),
+        Err(ThreadError::Database(err)) => Err(JobError::retryable(format!(
+            "load thread for auto_reply: {err}"
+        ))),
+        Err(ThreadError::Sql(err)) => Err(JobError::retryable(format!(
+            "load thread for auto_reply: {err}"
+        ))),
+        Err(ThreadError::Json(err)) => Err(JobError::Fatal(format!(
+            "load thread for auto_reply: decode error {err}"
+        ))),
+        Err(ThreadError::DateTimeParse(err)) => Err(JobError::Fatal(format!(
+            "load thread for auto_reply: decode error {err}"
+        ))),
     }
 }
 
@@ -384,6 +713,191 @@ pub async fn get_provider_message_id(
 struct ActionExecutionResult {
     /// The undo hint JSON value to store with the action
     undo_hint: Value,
+}
+
+async fn execute_forward(
+    dispatcher: &JobDispatcher,
+    action: &Action,
+    message: &Message,
+) -> Result<(), JobError> {
+    let to = parse_recipients(&action.parameters_json, "to")?;
+    if to.is_empty() {
+        return Err(JobError::Fatal(
+            "forward action requires at least one recipient in 'to'".to_string(),
+        ));
+    }
+
+    let cc = parse_recipients(&action.parameters_json, "cc")?;
+    let bcc = parse_recipients(&action.parameters_json, "bcc")?;
+    let include_original = action
+        .parameters_json
+        .get("include_original")
+        .and_then(|v| v.as_str())
+        .unwrap_or("inline");
+    let note = action
+        .parameters_json
+        .get("note")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let subject = forward_subject(
+        message,
+        action
+            .parameters_json
+            .get("subject")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+    );
+
+    // Fetch original message data to include attachments and/or raw content.
+    let gmail_client = create_gmail_client(dispatcher, &message.account_id).await?;
+    let gmail_message = gmail_client
+        .get_message(&message.provider_message_id)
+        .await
+        .map_err(|err| map_gmail_error("load original message", err))?;
+
+    let original_attachments = collect_attachments(
+        &gmail_client,
+        &message.provider_message_id,
+        gmail_message.payload.as_ref(),
+    )
+    .await?;
+
+    let (body_plain, body_html, attachments) = match include_original {
+        "inline" => {
+            let (body_plain, body_html, _) = build_forward_inline_body(note, message)?;
+            (body_plain, body_html, original_attachments)
+        }
+        "attachment" => {
+            let raw_message = gmail_client
+                .get_message_raw(&message.provider_message_id)
+                .await
+                .map_err(|err| map_gmail_error("load raw message", err))?;
+            build_forward_attachment_body(note, &raw_message)?
+        }
+        other => {
+            return Err(JobError::Fatal(format!(
+                "invalid include_original value: {other}"
+            )));
+        }
+    };
+
+    if body_plain.as_ref().map(|s| s.is_empty()).unwrap_or(true)
+        && body_html.as_ref().map(|s| s.is_empty()).unwrap_or(true)
+    {
+        return Err(JobError::Fatal(
+            "forward action produced empty body content".to_string(),
+        ));
+    }
+
+    let payload = json!({
+        "account_id": action.account_id,
+        "action_id": action.id,
+        "message_type": "forward",
+        "to": to,
+        "cc": cc,
+        "bcc": bcc,
+        "subject": subject,
+        "body_plain": body_plain,
+        "body_html": body_html,
+        "original_message_id": message.id,
+        "attachments": attachments,
+        "references": Vec::<String>::new(),
+    });
+
+    enqueue_outbound_send(dispatcher, action, payload).await
+}
+
+async fn execute_auto_reply(
+    dispatcher: &JobDispatcher,
+    action: &Action,
+    message: &Message,
+) -> Result<(), JobError> {
+    let mut to = parse_recipients(&action.parameters_json, "to")?;
+    if to.is_empty() {
+        if let Some(reply_to) = header_value_case_insensitive(&message.headers, "Reply-To")
+            .and_then(|v| {
+                v.split(',')
+                    .next()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(|s| {
+                        if let (Some(start), Some(end)) = (s.find('<'), s.rfind('>')) {
+                            s[start + 1..end].trim().to_string()
+                        } else {
+                            s.trim_matches('<').trim_matches('>').to_string()
+                        }
+                    })
+            })
+        {
+            to.push(reply_to);
+        } else if let Some(from) = message.from_email.as_ref() {
+            to.push(from.clone());
+        }
+    }
+
+    if to.is_empty() {
+        return Err(JobError::Fatal(
+            "auto_reply requires a recipient; provide 'to' or ensure original message has from"
+                .to_string(),
+        ));
+    }
+
+    let cc = parse_recipients(&action.parameters_json, "cc")?;
+    let bcc = parse_recipients(&action.parameters_json, "bcc")?;
+    let references = parse_recipients(&action.parameters_json, "references")?;
+
+    let body_plain = action
+        .parameters_json
+        .get("body")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .or_else(|| {
+            action
+                .parameters_json
+                .get("body_plain")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        });
+    let body_html = action
+        .parameters_json
+        .get("body_html")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    if body_plain.is_none() && body_html.is_none() {
+        return Err(JobError::Fatal(
+            "auto_reply requires 'body' or 'body_html' content".to_string(),
+        ));
+    }
+
+    let subject = reply_subject(
+        message,
+        action
+            .parameters_json
+            .get("subject")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+    );
+
+    let thread_id = lookup_provider_thread_id(dispatcher, &message.thread_id).await?;
+
+    let payload = json!({
+        "account_id": action.account_id,
+        "action_id": action.id,
+        "message_type": "reply",
+        "to": to,
+        "cc": cc,
+        "bcc": bcc,
+        "subject": subject,
+        "body_plain": body_plain,
+        "body_html": body_html,
+        "original_message_id": message.id,
+        "thread_id": thread_id,
+        "references": references,
+        "attachments": Vec::<Value>::new(),
+    });
+
+    enqueue_outbound_send(dispatcher, action, payload).await
 }
 
 /// Execute the archive action: removes the INBOX label from the message.
@@ -761,6 +1275,40 @@ pub async fn handle_action_gmail(dispatcher: &JobDispatcher, job: Job) -> Result
     // Get the provider message ID from our internal message record
     let message = get_provider_message_id(dispatcher, &action.message_id).await?;
     let provider_message_id = &message.provider_message_id;
+
+    // Forward and auto_reply enqueue outbound.send and leave completion to that job.
+    if action.action_type == "forward" || action.action_type == "auto_reply" {
+        let result = if action.action_type == "forward" {
+            execute_forward(dispatcher, &action, &message).await
+        } else {
+            execute_auto_reply(dispatcher, &action, &message).await
+        };
+
+        return match result {
+            Ok(_) => {
+                info!(
+                    account_id = %payload.account_id,
+                    action_id = %payload.action_id,
+                    action_type = %action.action_type,
+                    "enqueued outbound send job"
+                );
+                Ok(())
+            }
+            Err(job_error) => {
+                if !job_error.is_retryable() || job.attempts >= job.max_attempts {
+                    let _ = repo
+                        .mark_failed(
+                            DEFAULT_ORG_ID,
+                            DEFAULT_USER_ID,
+                            &action.id,
+                            job_error.to_string(),
+                        )
+                        .await;
+                }
+                Err(job_error)
+            }
+        };
+    }
 
     // Create Gmail client
     let gmail_client = create_gmail_client(dispatcher, &payload.account_id).await?;
@@ -1564,6 +2112,7 @@ mod tests {
         use crate::config::PolicyConfig;
         use crate::constants::{DEFAULT_ORG_ID, DEFAULT_USER_ID};
         use crate::decisions::{ActionRepository, ActionStatus, NewAction};
+        use crate::gmail::types::Header;
         use crate::gmail::{NoopTokenStore, OAuthTokens};
         use crate::labels::LabelRepository;
         use crate::llm::MockLLMClient;
@@ -1571,9 +2120,12 @@ mod tests {
         use crate::migrations::run_migrations;
         use crate::queue::JobQueue;
         use crate::threads::ThreadRepository;
+        use base64::Engine;
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
         use chrono::Utc;
+        use libsql::params;
         use tempfile::TempDir;
-        use wiremock::matchers::{body_json, method, path};
+        use wiremock::matchers::{body_json, method, path, query_param};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
         async fn setup_db() -> (crate::Database, TempDir) {
@@ -3662,6 +4214,561 @@ mod tests {
                 }
                 other => panic!("Expected Fatal error, got {:?}", other),
             }
+        }
+
+        #[tokio::test]
+        async fn handle_action_gmail_enqueues_forward_and_leaves_executing() {
+            let server = MockServer::start().await;
+            let api_base = format!("{}/gmail/v1/users", &server.uri());
+
+            // Full message with attachment reference
+            Mock::given(method("GET"))
+                .and(path("/gmail/v1/users/user@example.com/messages/msg-fwd"))
+                .and(query_param("format", "full"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "id": "msg-fwd",
+                    "threadId": "thread-123",
+                    "labelIds": ["INBOX"],
+                    "snippet": "Snippet",
+                    "internalDate": "1730000000000",
+                    "payload": {
+                        "mimeType": "multipart/mixed",
+                        "filename": "",
+                        "headers": [],
+                        "body": { "size": 0 },
+                        "parts": [
+                            {
+                                "partId": "1",
+                                "mimeType": "text/plain",
+                                "filename": "",
+                                "headers": [],
+                                "body": { "size": 10, "data": "VGVzdCBib2R5" },
+                                "parts": []
+                            },
+                            {
+                                "partId": "2",
+                                "mimeType": "text/plain",
+                                "filename": "note.txt",
+                                "headers": [],
+                                "body": { "size": 4, "attachmentId": "att-1" },
+                                "parts": []
+                            }
+                        ]
+                    }
+                })))
+                .mount(&server)
+                .await;
+
+            // Attachment fetch
+            Mock::given(method("GET"))
+                .and(path(
+                    "/gmail/v1/users/user@example.com/messages/msg-fwd/attachments/att-1",
+                ))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "attachmentId": "att-1",
+                    "size": 4,
+                    "data": "YXR0YQ==" // "atta"
+                })))
+                .mount(&server)
+                .await;
+
+            let (db, _dir) = setup_db().await;
+            let (_, account_id) = setup_account(&db).await;
+            let message_id = setup_message(&db, &account_id, "msg-fwd").await;
+            let action_id = setup_action(
+                &db,
+                &account_id,
+                &message_id,
+                "forward",
+                json!({
+                    "to": ["fwd@example.com"],
+                    "note": "Please see below",
+                    "include_original": "inline"
+                }),
+            )
+            .await;
+
+            let queue = JobQueue::new(db.clone());
+            let job_id = queue
+                .enqueue(
+                    JOB_TYPE,
+                    json!({"account_id": account_id.clone(), "action_id": action_id.clone()}),
+                    None,
+                    1,
+                )
+                .await
+                .expect("enqueue job");
+            let job = queue.fetch_job(&job_id).await.expect("fetch job");
+
+            let dispatcher = JobDispatcher::new(
+                db.clone(),
+                reqwest::Client::new(),
+                Arc::new(MockLLMClient::new()),
+                PolicyConfig::default(),
+            )
+            .with_gmail_api_base(api_base);
+
+            handle_action_gmail(&dispatcher, job)
+                .await
+                .expect("forward handled");
+
+            let action_repo = ActionRepository::new(db.clone());
+            let action = action_repo
+                .get_by_id(DEFAULT_ORG_ID, DEFAULT_USER_ID, &action_id)
+                .await
+                .expect("action");
+            assert_eq!(action.status, ActionStatus::Executing);
+
+            let conn = db.connection().await.expect("conn");
+            let mut rows = conn
+                .query(
+                    "SELECT payload_json FROM jobs WHERE type = ?1",
+                    params!["outbound.send"],
+                )
+                .await
+                .expect("query jobs");
+
+            let mut outbound_payload = None;
+            while let Some(row) = rows.next().await.expect("row") {
+                let payload_json: String = row.get(0).expect("payload");
+                let payload: Value = serde_json::from_str(&payload_json).expect("payload json");
+                if payload["action_id"] == action_id {
+                    outbound_payload = Some(payload);
+                    break;
+                }
+            }
+
+            let payload = outbound_payload.expect("outbound send job");
+            assert_eq!(payload["message_type"], "forward");
+            assert_eq!(payload["to"], json!(["fwd@example.com"]));
+            assert!(
+                payload["body_plain"]
+                    .as_str()
+                    .expect("body")
+                    .contains("Forwarded message")
+            );
+
+            let attachments = payload["attachments"]
+                .as_array()
+                .expect("attachments array");
+            assert_eq!(attachments.len(), 1);
+            let attachment = attachments[0].as_object().expect("attachment object");
+            assert_eq!(attachment["filename"], "note.txt");
+            assert_eq!(attachment["content_type"], "text/plain");
+            assert!(attachment.contains_key("data_base64"));
+        }
+
+        #[tokio::test]
+        async fn handle_action_gmail_enqueues_forward_with_attachment_body() {
+            let server = MockServer::start().await;
+            let api_base = format!("{}/gmail/v1/users", &server.uri());
+
+            Mock::given(method("GET"))
+                .and(path(
+                    "/gmail/v1/users/user@example.com/messages/msg-fwd-att",
+                ))
+                .and(query_param("format", "full"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "id": "msg-fwd-att",
+                    "threadId": "thread-123",
+                    "labelIds": ["INBOX"],
+                    "snippet": "Snippet",
+                    "internalDate": "1730000000000",
+                    "payload": {
+                        "mimeType": "text/plain",
+                        "filename": "",
+                        "headers": [],
+                        "body": { "size": 10, "data": "VGVzdCBib2R5" },
+                        "parts": []
+                    }
+                })))
+                .mount(&server)
+                .await;
+
+            let raw_base64 = URL_SAFE_NO_PAD.encode("RawMessageContent");
+            Mock::given(method("GET"))
+                .and(path(
+                    "/gmail/v1/users/user@example.com/messages/msg-fwd-att",
+                ))
+                .and(query_param("format", "raw"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "id": "msg-fwd-att",
+                    "threadId": "thread-123",
+                    "labelIds": ["INBOX"],
+                    "snippet": "Snippet",
+                    "internalDate": "1730000000000",
+                    "raw": raw_base64
+                })))
+                .mount(&server)
+                .await;
+
+            let (db, _dir) = setup_db().await;
+            let (_, account_id) = setup_account(&db).await;
+            let message_id = setup_message(&db, &account_id, "msg-fwd-att").await;
+            let action_id = setup_action(
+                &db,
+                &account_id,
+                &message_id,
+                "forward",
+                json!({
+                    "to": ["attach@example.com"],
+                    "note": "", // triggers default note
+                    "include_original": "attachment"
+                }),
+            )
+            .await;
+
+            let queue = JobQueue::new(db.clone());
+            let job_id = queue
+                .enqueue(
+                    JOB_TYPE,
+                    json!({"account_id": account_id.clone(), "action_id": action_id.clone()}),
+                    None,
+                    1,
+                )
+                .await
+                .expect("enqueue job");
+            let job = queue.fetch_job(&job_id).await.expect("fetch job");
+
+            let dispatcher = JobDispatcher::new(
+                db.clone(),
+                reqwest::Client::new(),
+                Arc::new(MockLLMClient::new()),
+                PolicyConfig::default(),
+            )
+            .with_gmail_api_base(api_base);
+
+            handle_action_gmail(&dispatcher, job)
+                .await
+                .expect("forward handled");
+
+            let action_repo = ActionRepository::new(db.clone());
+            let action = action_repo
+                .get_by_id(DEFAULT_ORG_ID, DEFAULT_USER_ID, &action_id)
+                .await
+                .expect("action");
+            assert_eq!(action.status, ActionStatus::Executing);
+
+            let conn = db.connection().await.expect("conn");
+            let mut rows = conn
+                .query(
+                    "SELECT payload_json FROM jobs WHERE type = ?1",
+                    params!["outbound.send"],
+                )
+                .await
+                .expect("query jobs");
+
+            let mut outbound_payload = None;
+            while let Some(row) = rows.next().await.expect("row") {
+                let payload_json: String = row.get(0).expect("payload");
+                let payload: Value = serde_json::from_str(&payload_json).expect("payload json");
+                if payload["action_id"] == action_id {
+                    outbound_payload = Some(payload);
+                    break;
+                }
+            }
+
+            let payload = outbound_payload.expect("outbound send job");
+            assert_eq!(payload["message_type"], "forward");
+            assert_eq!(payload["to"], json!(["attach@example.com"]));
+            assert_eq!(
+                payload["body_plain"],
+                json!("Forwarded message attached."),
+                "default note should be used when note is empty"
+            );
+
+            let attachments = payload["attachments"]
+                .as_array()
+                .expect("attachments array");
+            assert_eq!(attachments.len(), 1);
+            let attachment = attachments[0].as_object().expect("attachment object");
+            assert_eq!(attachment["filename"], "forwarded.eml");
+            assert_eq!(attachment["content_type"], "message/rfc822");
+            assert!(attachment.contains_key("data_base64"));
+            assert_eq!(attachment["data_base64"], json!(raw_base64));
+        }
+
+        #[tokio::test]
+        async fn handle_action_gmail_enqueues_auto_reply_with_threading() {
+            let (db, _dir) = setup_db().await;
+            let (_, account_id) = setup_account(&db).await;
+            let message_id = setup_message(&db, &account_id, "msg-reply").await;
+            let action_id = setup_action(
+                &db,
+                &account_id,
+                &message_id,
+                "auto_reply",
+                json!({
+                    "body": "Thanks!"
+                }),
+            )
+            .await;
+
+            let queue = JobQueue::new(db.clone());
+            let job_id = queue
+                .enqueue(
+                    JOB_TYPE,
+                    json!({"account_id": account_id.clone(), "action_id": action_id.clone()}),
+                    None,
+                    1,
+                )
+                .await
+                .expect("enqueue job");
+            let job = queue.fetch_job(&job_id).await.expect("fetch job");
+
+            let dispatcher = JobDispatcher::new(
+                db.clone(),
+                reqwest::Client::new(),
+                Arc::new(MockLLMClient::new()),
+                PolicyConfig::default(),
+            );
+
+            handle_action_gmail(&dispatcher, job)
+                .await
+                .expect("auto reply handled");
+
+            let action_repo = ActionRepository::new(db.clone());
+            let action = action_repo
+                .get_by_id(DEFAULT_ORG_ID, DEFAULT_USER_ID, &action_id)
+                .await
+                .expect("action");
+            assert_eq!(action.status, ActionStatus::Executing);
+
+            let conn = db.connection().await.expect("conn");
+            let mut rows = conn
+                .query(
+                    "SELECT payload_json FROM jobs WHERE type = ?1",
+                    params!["outbound.send"],
+                )
+                .await
+                .expect("query jobs");
+
+            let mut outbound_payload = None;
+            while let Some(row) = rows.next().await.expect("row") {
+                let payload_json: String = row.get(0).expect("payload");
+                let payload: Value = serde_json::from_str(&payload_json).expect("payload json");
+                if payload["action_id"] == action_id {
+                    outbound_payload = Some(payload);
+                    break;
+                }
+            }
+
+            let payload = outbound_payload.expect("outbound send job");
+            assert_eq!(payload["message_type"], "reply");
+            assert_eq!(payload["to"], json!(["sender@example.com"]));
+            assert_eq!(payload["subject"], json!("Re: Test Subject"));
+            assert_eq!(payload["thread_id"], json!("thread-123"));
+            assert_eq!(payload["body_plain"], json!("Thanks!"));
+        }
+
+        #[tokio::test]
+        async fn handle_action_gmail_auto_reply_prefers_reply_to() {
+            let (db, _dir) = setup_db().await;
+            let (_, account_id) = setup_account(&db).await;
+
+            let thread_repo = ThreadRepository::new(db.clone());
+            let thread = thread_repo
+                .upsert(
+                    DEFAULT_ORG_ID,
+                    DEFAULT_USER_ID,
+                    &account_id,
+                    "thread-replyto",
+                    Some("Subject".to_string()),
+                    Some("Snippet".to_string()),
+                    Some(Utc::now()),
+                    json!({}),
+                )
+                .await
+                .expect("thread");
+
+            let msg_repo = MessageRepository::new(db.clone());
+            let message = msg_repo
+                .upsert(NewMessage {
+                    org_id: DEFAULT_ORG_ID,
+                    user_id: DEFAULT_USER_ID,
+                    account_id: account_id.clone(),
+                    thread_id: thread.id.clone(),
+                    provider_message_id: "msg-replyto".to_string(),
+                    from_email: Some("from@example.com".to_string()),
+                    from_name: Some("From".to_string()),
+                    to: vec![Mailbox {
+                        email: "user@example.com".to_string(),
+                        name: None,
+                    }],
+                    cc: vec![],
+                    bcc: vec![],
+                    subject: Some("Subject".to_string()),
+                    received_at: Some(Utc::now()),
+                    internal_date: Some(Utc::now()),
+                    labels: vec!["INBOX".to_string()],
+                    headers: vec![Header {
+                        name: "Reply-To".to_string(),
+                        value: "list@example.com".to_string(),
+                    }],
+                    body_plain: Some("Body".to_string()),
+                    body_html: None,
+                    snippet: Some("Body".to_string()),
+                    raw_json: json!({}),
+                })
+                .await
+                .expect("message");
+
+            let action_id = setup_action(
+                &db,
+                &account_id,
+                &message.id,
+                "auto_reply",
+                json!({"body": "Hi"}),
+            )
+            .await;
+
+            let queue = JobQueue::new(db.clone());
+            let job_id = queue
+                .enqueue(
+                    JOB_TYPE,
+                    json!({"account_id": account_id.clone(), "action_id": action_id.clone()}),
+                    None,
+                    1,
+                )
+                .await
+                .expect("enqueue job");
+            let job = queue.fetch_job(&job_id).await.expect("fetch job");
+
+            let dispatcher = JobDispatcher::new(
+                db.clone(),
+                reqwest::Client::new(),
+                Arc::new(MockLLMClient::new()),
+                PolicyConfig::default(),
+            );
+
+            handle_action_gmail(&dispatcher, job)
+                .await
+                .expect("auto reply handled");
+
+            let conn = db.connection().await.expect("conn");
+            let mut rows = conn
+                .query(
+                    "SELECT payload_json FROM jobs WHERE type = ?1",
+                    params!["outbound.send"],
+                )
+                .await
+                .expect("query jobs");
+
+            let mut outbound_payload = None;
+            while let Some(row) = rows.next().await.expect("row") {
+                let payload_json: String = row.get(0).expect("payload");
+                let payload: Value = serde_json::from_str(&payload_json).expect("payload json");
+                if payload["action_id"] == action_id {
+                    outbound_payload = Some(payload);
+                    break;
+                }
+            }
+
+            let payload = outbound_payload.expect("outbound send job");
+            assert_eq!(payload["to"], json!(["list@example.com"]));
+            assert_eq!(payload["subject"], json!("Re: Subject"));
+        }
+
+        #[tokio::test]
+        async fn handle_action_gmail_fails_auto_reply_without_recipient() {
+            let (db, _dir) = setup_db().await;
+            let (_, account_id) = setup_account(&db).await;
+
+            // Message without from_email and no explicit recipients
+            let thread_repo = ThreadRepository::new(db.clone());
+            let thread = thread_repo
+                .upsert(
+                    DEFAULT_ORG_ID,
+                    DEFAULT_USER_ID,
+                    &account_id,
+                    "thread-missing-from",
+                    Some("No Sender".to_string()),
+                    Some("Snippet".to_string()),
+                    Some(Utc::now()),
+                    json!({}),
+                )
+                .await
+                .expect("create thread");
+
+            let msg_repo = MessageRepository::new(db.clone());
+            let message = msg_repo
+                .upsert(NewMessage {
+                    org_id: DEFAULT_ORG_ID,
+                    user_id: DEFAULT_USER_ID,
+                    account_id: account_id.clone(),
+                    thread_id: thread.id.clone(),
+                    provider_message_id: "msg-no-from".to_string(),
+                    from_email: None,
+                    from_name: None,
+                    to: vec![Mailbox {
+                        email: "user@example.com".to_string(),
+                        name: None,
+                    }],
+                    cc: vec![],
+                    bcc: vec![],
+                    subject: Some("No sender".to_string()),
+                    received_at: Some(Utc::now()),
+                    internal_date: Some(Utc::now()),
+                    labels: vec!["INBOX".to_string()],
+                    headers: vec![],
+                    body_plain: Some("Body".to_string()),
+                    body_html: None,
+                    snippet: Some("Body".to_string()),
+                    raw_json: json!({}),
+                })
+                .await
+                .expect("create message");
+
+            let action_repo = ActionRepository::new(db.clone());
+            let action_id = action_repo
+                .create(NewAction {
+                    org_id: DEFAULT_ORG_ID,
+                    user_id: DEFAULT_USER_ID,
+                    account_id: account_id.clone(),
+                    message_id: message.id.clone(),
+                    decision_id: None,
+                    action_type: "auto_reply".to_string(),
+                    parameters_json: json!({"body": "Hi"}),
+                    status: ActionStatus::Queued,
+                    error_message: None,
+                    executed_at: None,
+                    undo_hint_json: json!({}),
+                    trace_id: None,
+                })
+                .await
+                .expect("create action")
+                .id;
+
+            let queue = JobQueue::new(db.clone());
+            let job_id = queue
+                .enqueue(
+                    JOB_TYPE,
+                    json!({"account_id": account_id.clone(), "action_id": action_id.clone()}),
+                    None,
+                    1,
+                )
+                .await
+                .expect("enqueue job");
+            let job = queue.fetch_job(&job_id).await.expect("fetch job");
+
+            let dispatcher = JobDispatcher::new(
+                db.clone(),
+                reqwest::Client::new(),
+                Arc::new(MockLLMClient::new()),
+                PolicyConfig::default(),
+            );
+
+            let err = handle_action_gmail(&dispatcher, job)
+                .await
+                .expect_err("auto_reply should fail without recipient");
+            assert!(matches!(err, JobError::Fatal(_)));
+
+            let action = action_repo
+                .get_by_id(DEFAULT_ORG_ID, DEFAULT_USER_ID, &action_id)
+                .await
+                .expect("action");
+            assert_eq!(action.status, ActionStatus::Failed);
+            assert!(action.error_message.as_ref().unwrap().contains("recipient"));
         }
     }
 }

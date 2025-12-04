@@ -17,6 +17,16 @@ pub struct MessagePartBody {
     pub attachment_id: Option<String>,
 }
 
+/// Attachment payload returned by the Gmail attachments.get endpoint.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MessageAttachment {
+    #[serde(rename = "attachmentId", default)]
+    pub attachment_id: Option<String>,
+    pub size: Option<i64>,
+    /// Base64url-encoded binary data of the attachment.
+    pub data: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
 #[ts(export)]
 pub struct Header {
@@ -166,6 +176,27 @@ pub struct ModifyMessageRequest {
     /// Label IDs to remove from the message.
     #[serde(rename = "removeLabelIds", skip_serializing_if = "Option::is_none")]
     pub remove_label_ids: Option<Vec<String>>,
+}
+
+/// Request body for the Gmail Users.messages.send endpoint.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SendMessageRequest {
+    /// Base64url-encoded RFC 5322 message.
+    pub raw: String,
+    /// Gmail thread ID to associate the sent message with (for replies).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
+}
+
+/// Response from the Gmail Users.messages.send endpoint.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SendMessageResponse {
+    pub id: String,
+    pub thread_id: String,
+    #[serde(default)]
+    pub label_ids: Vec<String>,
 }
 
 #[cfg(test)]

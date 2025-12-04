@@ -147,3 +147,88 @@ Valid units: `minutes`, `hours`, `days`. Maximum duration: 1 year.
 - If the snooze label is removed externally, unsnooze still adds INBOX back
 - If the snooze label config changes, unsnooze uses the label ID stored in the job payload
 
+### **6.5 Outbound Email (Send)**
+
+The `GmailClient` supports sending emails for forward and auto_reply actions:
+
+**Send Message API**:
+- `send_message(raw_message, thread_id)` - Send an RFC 2822 MIME message via Gmail API
+- `raw_message` is base64url-encoded (no padding)
+- `thread_id` is optional; when provided, Gmail adds the sent message to an existing thread
+
+**API Request**:
+```rust
+// Types in server/crates/ashford-core/src/gmail/types.rs
+pub struct SendMessageRequest {
+    pub raw: String,        // base64url-encoded RFC 2822 message
+    pub thread_id: Option<String>,
+}
+
+pub struct SendMessageResponse {
+    pub id: String,         // Gmail message ID of sent message
+    pub thread_id: String,  // Thread the message belongs to
+    pub label_ids: Vec<String>,
+}
+```
+
+**MIME Message Builder**:
+The `MimeMessage` struct (in `server/crates/ashford-core/src/gmail/mime_builder.rs`) constructs RFC 2822 compliant emails using the `mail-builder` crate:
+
+```rust
+use ashford_core::gmail::{MimeMessage, EmailAddress};
+
+// Build an email message
+let message = MimeMessage::new()
+    .from(EmailAddress::new("sender@gmail.com", Some("Sender Name")))
+    .to(EmailAddress::new("recipient@example.com", None))
+    .cc(EmailAddress::new("cc@example.com", Some("CC Name")))
+    .subject("Re: Original Subject")
+    .body_plain("Plain text body")
+    .body_html("<p>HTML body</p>")
+    .in_reply_to("<original-message-id@gmail.com>")  // For replies
+    .references("<ref1@gmail.com> <ref2@gmail.com>") // Thread chain
+    .attachment("document.pdf", "application/pdf", file_bytes);
+
+// Get base64url-encoded output for Gmail API
+let raw = message.to_base64url()?;
+```
+
+**EmailAddress**:
+```rust
+pub struct EmailAddress {
+    pub email: String,
+    pub name: Option<String>,
+}
+
+// Creates: "Display Name <email@example.com>" or just "email@example.com"
+EmailAddress::new("email@example.com", Some("Display Name"))
+```
+
+**Threading Headers**:
+For replies, proper threading requires:
+- `In-Reply-To`: The `Message-ID` of the message being replied to
+- `References`: The full chain of `Message-ID`s in the thread
+
+For forwards, these headers are omitted so Gmail creates a new conversation thread.
+
+**Attachments**:
+The builder supports binary attachments:
+```rust
+message.attachment(
+    "filename.pdf",           // Filename shown to recipient
+    "application/pdf",        // MIME type
+    file_bytes                // Vec<u8> of file content
+);
+```
+
+Attachments are Base64-encoded in the MIME message per RFC 2045.
+
+**Error Handling**:
+`send_message` errors map to `GmailClientError`:
+- HTTP 400 → Invalid message format or encoding
+- HTTP 403 → Insufficient permissions or sending quota exceeded
+- HTTP 429 → Rate limited (retryable)
+- HTTP 5xx → Server error (retryable)
+
+See job_queue.md section 5.9 for the `outbound.send` job that orchestrates email sending.
+

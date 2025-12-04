@@ -20,6 +20,7 @@ mod classify;
 mod history_sync_gmail;
 mod ingest_gmail;
 mod labels_sync_gmail;
+mod outbound_send;
 mod unsnooze_gmail;
 
 use action_gmail::handle_action_gmail;
@@ -29,6 +30,7 @@ use classify::handle_classify;
 use history_sync_gmail::handle_history_sync_gmail;
 use ingest_gmail::handle_ingest_gmail;
 use labels_sync_gmail::handle_labels_sync_gmail;
+use outbound_send::handle_outbound_send;
 use unsnooze_gmail::handle_unsnooze_gmail;
 
 pub const JOB_TYPE_ACTION_GMAIL: &str = action_gmail::JOB_TYPE;
@@ -38,6 +40,7 @@ pub const JOB_TYPE_CLASSIFY: &str = "classify";
 pub const JOB_TYPE_INGEST_GMAIL: &str = "ingest.gmail";
 pub const JOB_TYPE_HISTORY_SYNC_GMAIL: &str = "history.sync.gmail";
 pub const JOB_TYPE_LABELS_SYNC_GMAIL: &str = labels_sync_gmail::JOB_TYPE;
+pub const JOB_TYPE_OUTBOUND_SEND: &str = outbound_send::JOB_TYPE;
 pub const JOB_TYPE_UNSNOOZE_GMAIL: &str = unsnooze_gmail::JOB_TYPE;
 
 #[derive(Clone)]
@@ -89,6 +92,7 @@ impl JobExecutor for JobDispatcher {
             JOB_TYPE_INGEST_GMAIL => handle_ingest_gmail(self, job).await,
             JOB_TYPE_HISTORY_SYNC_GMAIL => handle_history_sync_gmail(self, job).await,
             JOB_TYPE_LABELS_SYNC_GMAIL => handle_labels_sync_gmail(self, job).await,
+            JOB_TYPE_OUTBOUND_SEND => handle_outbound_send(self, job).await,
             JOB_TYPE_UNSNOOZE_GMAIL => handle_unsnooze_gmail(self, job).await,
             other => Err(JobError::Fatal(format!("unknown job type: {other}"))),
         }

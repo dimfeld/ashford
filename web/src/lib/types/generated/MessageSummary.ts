@@ -4,13 +4,4 @@
  * Summary of a message for list views.
  * Excludes full body content, headers, and raw JSON.
  */
-export type MessageSummary = {
-	id: string;
-	account_id: string;
-	subject: string | null;
-	snippet: string | null;
-	from_email: string | null;
-	from_name: string | null;
-	received_at: string | null;
-	labels: Array<string>;
-};
+export type MessageSummary = { id: string, account_id: string, subject: string | null, snippet: string | null, from_email: string | null, from_name: string | null, received_at: string | null, labels: Array<string>, };

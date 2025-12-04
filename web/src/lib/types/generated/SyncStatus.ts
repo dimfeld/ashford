@@ -3,4 +3,4 @@
 /**
  * Tracks the synchronization status for an account.
  */
-export type SyncStatus = 'normal' | 'needs_backfill' | 'backfilling';
+export type SyncStatus = "normal" | "needs_backfill" | "backfilling";
