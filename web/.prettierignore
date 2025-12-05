@@ -8,3 +8,6 @@ bun.lockb
 # Miscellaneous
 /static/
 /src/lib/types/generated
+
+# Svelte files with snippet type annotations that Prettier mangles
+/src/lib/components/ui/sidebar/sidebar-menu-button.svelte

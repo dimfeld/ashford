@@ -4,8 +4,10 @@
 export type { AccountState } from './AccountState';
 export type { AccountSummary } from './AccountSummary';
 export type { Action } from './Action';
+export type { ActionDetail } from './ActionDetail';
 export type { ActionLink } from './ActionLink';
 export type { ActionLinkRelationType } from './ActionLinkRelationType';
+export type { ActionListItem } from './ActionListItem';
 export type { ActionStatus } from './ActionStatus';
 export type { Decision } from './Decision';
 export type { DecisionSource } from './DecisionSource';
@@ -23,6 +25,7 @@ export type { PaginatedResponse } from './PaginatedResponse';
 export type { RuleScope } from './RuleScope';
 export type { SafeMode } from './SafeMode';
 export type { SyncStatus } from './SyncStatus';
+export type { UndoActionResponse } from './UndoActionResponse';
 
 // Condition is an untagged enum in Rust that ts-rs doesn't handle well,
 // so we manually define the union type here

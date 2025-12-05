@@ -5,9 +5,11 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use ts_rs::TS;
 
 use crate::accounts::SyncStatus;
+use crate::decisions::{ActionStatus, Decision};
 
 /// Summary of an account for API responses.
 /// Excludes sensitive OAuth tokens and configuration details.
@@ -55,6 +57,109 @@ pub struct MessageSummary {
     pub from_name: Option<String>,
     pub received_at: Option<DateTime<Utc>>,
     pub labels: Vec<String>,
+}
+
+/// Action summary for list views.
+/// Includes joined data from messages and decisions for display purposes.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ActionListItem {
+    pub id: String,
+    pub account_id: String,
+    pub action_type: String,
+    pub status: ActionStatus,
+    /// Confidence from the associated decision (0.0 - 1.0)
+    pub confidence: Option<f64>,
+    pub created_at: DateTime<Utc>,
+    pub executed_at: Option<DateTime<Utc>>,
+    /// Subject from the associated message
+    pub message_subject: Option<String>,
+    /// Sender email from the associated message
+    pub message_from_email: Option<String>,
+    /// Sender name from the associated message
+    pub message_from_name: Option<String>,
+    /// Whether this action can be undone
+    pub can_undo: bool,
+}
+
+/// Detailed action information including decision and message data.
+/// Used for the action detail view.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ActionDetail {
+    pub id: String,
+    #[ts(type = "number")]
+    pub org_id: i64,
+    #[ts(type = "number")]
+    pub user_id: i64,
+    pub account_id: String,
+    pub message_id: String,
+    pub decision_id: Option<String>,
+    pub action_type: String,
+    #[ts(type = "Record<string, unknown>")]
+    pub parameters_json: Value,
+    pub status: ActionStatus,
+    pub error_message: Option<String>,
+    pub executed_at: Option<DateTime<Utc>>,
+    #[ts(type = "Record<string, unknown>")]
+    pub undo_hint_json: Value,
+    pub trace_id: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    /// The associated decision, if any
+    pub decision: Option<Decision>,
+    /// Subject from the associated message
+    pub message_subject: Option<String>,
+    /// Sender email from the associated message
+    pub message_from_email: Option<String>,
+    /// Sender name from the associated message
+    pub message_from_name: Option<String>,
+    /// Snippet from the associated message
+    pub message_snippet: Option<String>,
+    /// Provider message ID for Gmail link construction
+    pub provider_message_id: Option<String>,
+    /// Account email for Gmail link construction
+    pub account_email: Option<String>,
+    /// Whether this action can be undone
+    pub can_undo: bool,
+    /// Constructed Gmail deep link to the original message
+    pub gmail_link: Option<String>,
+    /// Whether this action has already been undone
+    pub has_been_undone: bool,
+    /// If undone, the ID of the undo action
+    pub undo_action_id: Option<String>,
+}
+
+/// Response for the undo action endpoint.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct UndoActionResponse {
+    pub undo_action_id: String,
+    pub status: String,
+    pub message: String,
+}
+
+/// Filter parameters for listing actions.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ActionListFilter {
+    /// Time window: "24h", "7d", "30d", or omit for all
+    pub time_window: Option<String>,
+    /// Filter by account ID
+    pub account_id: Option<String>,
+    /// Filter by sender (email or domain)
+    pub sender: Option<String>,
+    /// Filter by action types (comma-separated)
+    pub action_type: Option<String>,
+    /// Filter by statuses (comma-separated)
+    pub status: Option<String>,
+    /// Minimum confidence (0-100)
+    pub min_confidence: Option<f64>,
+    /// Maximum confidence (0-100)
+    pub max_confidence: Option<f64>,
+    /// Number of items per page (default 20, max 100)
+    pub limit: Option<i64>,
+    /// Offset for pagination
+    pub offset: Option<i64>,
 }
 
 /// Generic pagination wrapper for API list responses.

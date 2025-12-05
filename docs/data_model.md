@@ -202,6 +202,12 @@ CREATE INDEX actions_status_idx
 **Repository Methods:**
 - `get_by_id(org_id, user_id, id)` - Fetch action by internal UUID
 - `create(action)` - Insert a new action record
+- `list_filtered(org_id, user_id, filter)` - List actions with optional filters and pagination
+  - Filters: `time_window` (24h/7d/30d), `account_id`, `sender` (smart match: `@` = exact email, else domain suffix), `action_types[]`, `statuses[]`, `min_confidence`, `max_confidence`
+  - Pagination: `limit` (max 100), `offset`
+  - Returns: `PaginatedResponse<ActionListItem>` with total count
+- `get_detail(org_id, user_id, id)` - Fetch action with joined decision, message, and account data
+  - Returns: `ActionDetail` with `can_undo`, `gmail_link`, `has_been_undone`, and `undo_action_id` computed fields
 - `mark_executing(org_id, user_id, id)` - Transition to Executing status, set executed_at
 - `mark_completed(org_id, user_id, id)` - Transition to Completed status
 - `mark_completed_with_undo_hint(org_id, user_id, id, undo_hint)` - Atomically set Completed status and undo_hint_json

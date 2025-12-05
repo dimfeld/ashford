@@ -46,6 +46,9 @@ fn export_typescript_types() {
     ashford_core::LabelSummary::export_all().expect("LabelSummary");
     ashford_core::MessageSummary::export_all().expect("MessageSummary");
     ashford_core::PaginatedResponse::<String>::export_all().expect("PaginatedResponse");
+    ashford_core::ActionListItem::export_all().expect("ActionListItem");
+    ashford_core::ActionDetail::export_all().expect("ActionDetail");
+    ashford_core::UndoActionResponse::export_all().expect("UndoActionResponse");
 
     // Post-process generated files to fix missing imports
     // ts-rs doesn't add imports for types referenced in #[ts(type = "...")] annotations

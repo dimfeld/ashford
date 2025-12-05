@@ -6,4 +6,7 @@
 
 pub mod types;
 
-pub use types::{AccountSummary, LabelColors, LabelSummary, MessageSummary, PaginatedResponse};
+pub use types::{
+    AccountSummary, ActionDetail, ActionListFilter, ActionListItem, LabelColors, LabelSummary,
+    MessageSummary, PaginatedResponse, UndoActionResponse,
+};

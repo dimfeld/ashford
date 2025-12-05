@@ -9,6 +9,7 @@ The web UI is built with SvelteKit and provides a user interface for viewing and
 TypeScript types are automatically generated from Rust types using `ts-rs`. The generated types live in `web/src/lib/types/generated/` and include:
 
 - **Action types**: `Action`, `ActionStatus`, `ActionLink`, `ActionLinkRelationType`
+- **Action API types**: `ActionListItem` (enriched list item with message/confidence data), `ActionDetail` (full detail with computed fields), `UndoActionResponse`
 - **Decision types**: `Decision`, `DecisionSource`
 - **Rule types**: `DeterministicRule`, `LlmRule`, `RuleScope`, `SafeMode`, `Condition`
 - **Summary types**: `AccountSummary`, `LabelSummary`, `MessageSummary` (optimized for API responses)
@@ -263,7 +264,7 @@ For real-time streaming (LLM responses), use the SSE pattern described above.
 
 ### Example: Query Remote Function
 
-See `$lib/api/example.remote.ts` for complete working examples.
+See `$lib/api/actions.remote.ts` and `$lib/api/accounts.remote.ts` for complete working examples.
 
 ```typescript
 // lib/actions.remote.ts
@@ -428,12 +429,28 @@ The Rust backend exposes the following REST endpoints on `http://127.0.0.1:17800
 
 ### Actions
 - `GET /api/actions` - List actions with optional filters
-  - Query params: `timeWindow`, `account`, `sender`, `actionType`, `status`, `minConfidence`, `maxConfidence`, `page`, `limit`
-  - Returns: Paginated list of actions
-- `GET /api/actions/{id}` - Get action detail
-  - Returns: Full action details including decision JSON, rationale, links
+  - Query params:
+    - `time_window` - Time filter: `24h`, `7d`, or `30d`
+    - `account_id` - Filter by account UUID
+    - `sender` - Smart match: contains `@` = exact email match, otherwise matches domain suffix
+    - `action_type` - Comma-separated action types (e.g., `archive,apply_label`)
+    - `status` - Comma-separated statuses (e.g., `completed,failed`)
+    - `min_confidence`, `max_confidence` - Confidence range (0.0 to 1.0)
+    - `limit` - Results per page (default 20, max 100)
+    - `offset` - Pagination offset (default 0)
+  - Returns: `PaginatedResponse<ActionListItem>` with `items`, `total`, `limit`, `offset`, `has_more`
+- `GET /api/actions/{id}` - Get action detail with computed fields
+  - Returns: `ActionDetail` including:
+    - Full action data with joined decision and message fields
+    - `can_undo` - Whether undo is available (status=Completed, has undo_hint, not already undone)
+    - `gmail_link` - Constructed deep link to message in Gmail
+    - `has_been_undone` - Whether this action was already undone
+    - `undo_action_id` - ID of the undo action if one exists
 - `POST /api/actions/{id}/undo` - Enqueue undo job for an action
-  - Returns: Job ID
+  - Validates: status=Completed, has undo_hint with inverse_action, not already undone
+  - Creates: New action from undo_hint, ActionLink with `undo_of` relation, enqueues job
+  - Returns: `UndoActionResponse` with `undo_action_id`, `status: "queued"`, `message`
+  - Errors: 400 (not eligible), 404 (not found), 500 (internal error)
 
 ### Rules
 - `GET /api/rules/deterministic` - List all deterministic rules
@@ -465,6 +482,11 @@ The Rust backend exposes the following REST endpoints on `http://127.0.0.1:17800
 - `POST /api/rules/assistant/apply` - Apply proposed rule changes
   - Body: `{ conversationId: string, changeIds: string[] }`
   - Returns: `{ success: boolean, appliedRules: Rule[] }`
+
+### Accounts
+- `GET /api/accounts` - List all accounts for the current user
+  - Returns: `AccountSummary[]` with `id`, `email`, `display_name`, `provider`
+  - Note: OAuth credentials are stripped for security
 
 ### Settings
 - `GET /api/settings` - Get system configuration

@@ -1,3 +1,5 @@
+mod api;
+
 use std::sync::Arc;
 use std::{env, net::SocketAddr};
 
@@ -75,6 +77,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 fn router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
+        .nest("/api", api::router(state.clone()))
         .with_state(state)
 }
 

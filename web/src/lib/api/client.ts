@@ -4,27 +4,16 @@
  */
 
 import { env } from '$env/dynamic/private';
+import { ApiError } from './errors';
+
+// Re-export ApiError for backwards compatibility
+export { ApiError };
 
 /**
  * Base URL for the backend API.
  * Configured via BACKEND_URL environment variable, defaults to localhost.
  */
 const baseUrl = env.BACKEND_URL || 'http://127.0.0.1:17800';
-
-/**
- * Custom error class for API errors with additional context.
- */
-export class ApiError extends Error {
-	constructor(
-		message: string,
-		public readonly status: number,
-		public readonly statusText: string,
-		public readonly body?: unknown
-	) {
-		super(message);
-		this.name = 'ApiError';
-	}
-}
 
 /**
  * Options for API requests.

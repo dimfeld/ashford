@@ -1,5 +1,6 @@
 use chrono::{DateTime, SecondsFormat, Utc};
 use libsql::{Row, params};
+use serde::de::Error as DeError;
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -597,6 +598,429 @@ impl ActionRepository {
             },
         }
     }
+
+    /// List actions with filtering and pagination.
+    ///
+    /// Returns a tuple of (items, total_count) for pagination.
+    ///
+    /// # Arguments
+    /// * `org_id` - Organization ID
+    /// * `user_id` - User ID
+    /// * `min_created_at` - Filter actions created at or after this time
+    /// * `account_id` - Optional filter by account ID
+    /// * `sender` - Optional sender filter (email or domain suffix)
+    /// * `action_types` - Optional list of action types to include
+    /// * `statuses` - Optional list of statuses to include
+    /// * `min_confidence` - Optional minimum confidence (0.0 - 1.0)
+    /// * `max_confidence` - Optional maximum confidence (0.0 - 1.0)
+    /// * `limit` - Number of items to return
+    /// * `offset` - Offset for pagination
+    #[allow(clippy::too_many_arguments)]
+    pub async fn list_filtered(
+        &self,
+        org_id: i64,
+        user_id: i64,
+        min_created_at: Option<DateTime<Utc>>,
+        account_id: Option<&str>,
+        sender: Option<&str>,
+        action_types: Option<&[String]>,
+        statuses: Option<&[ActionStatus]>,
+        min_confidence: Option<f64>,
+        max_confidence: Option<f64>,
+        limit: i64,
+        offset: i64,
+    ) -> Result<(Vec<ActionListItemRow>, i64), ActionError> {
+        let conn = self.db.connection().await?;
+
+        let mut conditions = vec!["a.org_id = ?".to_string(), "a.user_id = ?".to_string()];
+        let mut params: Vec<libsql::Value> = vec![org_id.into(), user_id.into()];
+
+        if let Some(min_created_at) = min_created_at {
+            conditions.push("a.created_at >= ?".to_string());
+            params.push(to_rfc3339(min_created_at).into());
+        }
+
+        if let Some(account_id) = account_id {
+            conditions.push("a.account_id = ?".to_string());
+            params.push(account_id.to_string().into());
+        }
+
+        if let Some(sender) = sender {
+            if sender.contains('@') {
+                conditions.push("m.from_email = ?".to_string());
+                params.push(sender.to_string().into());
+            } else {
+                conditions.push("(m.from_email LIKE '%@' || ? OR m.from_email LIKE '%.' || ?)".to_string());
+                params.push(sender.to_string().into());
+                params.push(sender.to_string().into());
+            }
+        }
+
+        if let Some(types) = action_types {
+            if !types.is_empty() {
+                let placeholders = vec!["?"; types.len()].join(", ");
+                conditions.push(format!("a.action_type IN ({})", placeholders));
+                params.extend(types.iter().cloned().map(libsql::Value::from));
+            }
+        }
+
+        if let Some(sts) = statuses {
+            if !sts.is_empty() {
+                let placeholders = vec!["?"; sts.len()].join(", ");
+                conditions.push(format!("a.status IN ({})", placeholders));
+                params.extend(sts.iter().map(|s| s.as_str().into()));
+            }
+        }
+
+        if min_confidence.is_some() || max_confidence.is_some() {
+            conditions.push("d.confidence IS NOT NULL".to_string());
+        }
+        if let Some(min_c) = min_confidence {
+            conditions.push("d.confidence >= ?".to_string());
+            params.push(min_c.into());
+        }
+        if let Some(max_c) = max_confidence {
+            conditions.push("d.confidence <= ?".to_string());
+            params.push(max_c.into());
+        }
+
+        let where_clause = conditions.join(" AND ");
+
+        let count_sql = format!(
+            "SELECT COUNT(*)
+             FROM actions a
+             LEFT JOIN messages m ON a.message_id = m.id
+             LEFT JOIN decisions d ON a.decision_id = d.id
+             WHERE {}",
+            where_clause
+        );
+
+        let list_sql = format!(
+            "SELECT
+                a.id,
+                a.account_id,
+                a.action_type,
+                a.status,
+                d.confidence,
+                a.created_at,
+                a.executed_at,
+                m.subject,
+                m.from_email,
+                m.from_name,
+                a.undo_hint_json,
+                EXISTS(
+                    SELECT 1 FROM action_links al
+                    WHERE al.cause_action_id = a.id AND al.relation_type = 'undo_of'
+                ) as has_been_undone
+             FROM actions a
+             LEFT JOIN messages m ON a.message_id = m.id
+             LEFT JOIN decisions d ON a.decision_id = d.id
+             WHERE {}
+             ORDER BY a.created_at DESC
+             LIMIT ? OFFSET ?",
+            where_clause
+        );
+
+        let total: i64 = {
+            let mut rows = conn.query(&count_sql, params.clone()).await?;
+            match rows.next().await? {
+                Some(row) => row.get(0)?,
+                None => 0,
+            }
+        };
+
+        let items = {
+            let mut list_params = params.clone();
+            list_params.push(limit.into());
+            list_params.push(offset.into());
+
+            let mut rows = conn.query(&list_sql, list_params).await?;
+            let mut items = Vec::new();
+            while let Some(row) = rows.next().await? {
+                items.push(row_to_action_list_item(row)?);
+            }
+            items
+        };
+
+        Ok((items, total))
+    }
+
+    /// Get detailed action information with joined decision and message data.
+    ///
+    /// Returns action details including:
+    /// - Full action record
+    /// - Associated decision (if any)
+    /// - Message summary (subject, sender, snippet)
+    /// - Account email for Gmail link construction
+    /// - Whether the action has been undone
+    pub async fn get_detail(
+        &self,
+        org_id: i64,
+        user_id: i64,
+        id: &str,
+    ) -> Result<ActionDetailRow, ActionError> {
+        let conn = self.db.connection().await?;
+
+        let action_columns = "a.id, a.account_id, a.message_id, a.decision_id, a.action_type, \
+            a.parameters_json, a.status, a.error_message, a.executed_at, a.undo_hint_json, \
+            a.trace_id, a.created_at, a.updated_at, a.org_id, a.user_id";
+
+        let sql = format!(
+            "SELECT
+                {action_columns},
+                d.id as decision_id_check,
+                d.account_id as d_account_id,
+                d.message_id as d_message_id,
+                d.source as d_source,
+                d.decision_json as d_decision_json,
+                d.action_type as d_action_type,
+                d.confidence as d_confidence,
+                d.needs_approval as d_needs_approval,
+                d.rationale as d_rationale,
+                d.telemetry_json as d_telemetry_json,
+                d.created_at as d_created_at,
+                d.updated_at as d_updated_at,
+                d.org_id as d_org_id,
+                d.user_id as d_user_id,
+                m.subject as m_subject,
+                m.from_email as m_from_email,
+                m.from_name as m_from_name,
+                m.snippet as m_snippet,
+                m.provider_message_id as m_provider_message_id,
+                acc.email as acc_email,
+                (
+                    SELECT al.effect_action_id
+                    FROM action_links al
+                    WHERE al.cause_action_id = a.id AND al.relation_type = 'undo_of'
+                    LIMIT 1
+                ) as undo_action_id
+             FROM actions a
+             LEFT JOIN decisions d ON a.decision_id = d.id
+             LEFT JOIN messages m ON a.message_id = m.id
+             LEFT JOIN accounts acc ON a.account_id = acc.id
+             WHERE a.id = ?1 AND a.org_id = ?2 AND a.user_id = ?3"
+        );
+
+        let mut rows = conn.query(&sql, params![id, org_id, user_id]).await?;
+
+        match rows.next().await? {
+            Some(row) => row_to_action_detail(row),
+            None => Err(ActionError::NotFound(id.to_string())),
+        }
+    }
+}
+
+/// Internal type for list_filtered results before computing can_undo.
+#[derive(Debug, Clone)]
+pub struct ActionListItemRow {
+    pub id: String,
+    pub account_id: String,
+    pub action_type: String,
+    pub status: ActionStatus,
+    pub confidence: Option<f64>,
+    pub created_at: DateTime<Utc>,
+    pub executed_at: Option<DateTime<Utc>>,
+    pub message_subject: Option<String>,
+    pub message_from_email: Option<String>,
+    pub message_from_name: Option<String>,
+    pub undo_hint_json: serde_json::Value,
+    pub has_been_undone: bool,
+}
+
+impl ActionListItemRow {
+    /// Compute whether this action can be undone.
+    ///
+    /// An action can be undone if:
+    /// 1. Status is Completed
+    /// 2. undo_hint_json contains inverse_action info
+    /// 3. Has not already been undone
+    pub fn can_undo(&self) -> bool {
+        if self.status != ActionStatus::Completed {
+            return false;
+        }
+        if self.has_been_undone {
+            return false;
+        }
+        // Check if undo_hint_json has inverse_action
+        self.undo_hint_json.get("inverse_action").is_some()
+    }
+}
+
+/// Internal type for get_detail results before computing derived fields.
+#[derive(Debug, Clone)]
+pub struct ActionDetailRow {
+    pub action: Action,
+    pub decision: Option<Decision>,
+    pub message_subject: Option<String>,
+    pub message_from_email: Option<String>,
+    pub message_from_name: Option<String>,
+    pub message_snippet: Option<String>,
+    pub provider_message_id: Option<String>,
+    pub account_email: Option<String>,
+    pub undo_action_id: Option<String>,
+}
+
+impl ActionDetailRow {
+    /// Compute whether this action can be undone.
+    pub fn can_undo(&self) -> bool {
+        if self.action.status != ActionStatus::Completed {
+            return false;
+        }
+        if self.undo_action_id.is_some() {
+            return false;
+        }
+        self.action.undo_hint_json.get("inverse_action").is_some()
+    }
+
+    /// Check if this action has been undone.
+    pub fn has_been_undone(&self) -> bool {
+        self.undo_action_id.is_some()
+    }
+
+    /// Construct Gmail deep link if possible.
+    pub fn gmail_link(&self) -> Option<String> {
+        match (&self.account_email, &self.provider_message_id) {
+            (Some(email), Some(msg_id)) => Some(format!(
+                "https://mail.google.com/mail/u/{}/#inbox/{}",
+                email, msg_id
+            )),
+            _ => None,
+        }
+    }
+}
+
+fn row_to_action_list_item(row: Row) -> Result<ActionListItemRow, ActionError> {
+    let status_str: String = row.get(3)?;
+    let status = ActionStatus::from_str(&status_str)
+        .ok_or_else(|| ActionError::InvalidStatus(status_str.clone()))?;
+
+    let created_at_str: String = row.get(5)?;
+    let executed_at_str: Option<String> = row.get(6)?;
+    let undo_hint_str: String = row.get(10)?;
+    let has_been_undone: i64 = row.get(11)?;
+
+    Ok(ActionListItemRow {
+        id: row.get(0)?,
+        account_id: row.get(1)?,
+        action_type: row.get(2)?,
+        status,
+        confidence: row.get(4)?,
+        created_at: DateTime::parse_from_rfc3339(&created_at_str)?.with_timezone(&Utc),
+        executed_at: match executed_at_str {
+            Some(s) => Some(DateTime::parse_from_rfc3339(&s)?.with_timezone(&Utc)),
+            None => None,
+        },
+        message_subject: row.get(7)?,
+        message_from_email: row.get(8)?,
+        message_from_name: row.get(9)?,
+        undo_hint_json: serde_json::from_str(&undo_hint_str)?,
+        has_been_undone: has_been_undone != 0,
+    })
+}
+
+fn row_to_action_detail(row: Row) -> Result<ActionDetailRow, ActionError> {
+    // Parse action fields (indices 0-14) - same order as ACTION_COLUMNS
+    let parameters_json: String = row.get(5)?;
+    let status_str: String = row.get(6)?;
+    let executed_at_str: Option<String> = row.get(8)?;
+    let undo_hint_json_str: String = row.get(9)?;
+    let created_at_str: String = row.get(11)?;
+    let updated_at_str: String = row.get(12)?;
+    let org_id: i64 = row.get(13)?;
+    let user_id: i64 = row.get(14)?;
+
+    let status = ActionStatus::from_str(&status_str)
+        .ok_or_else(|| ActionError::InvalidStatus(status_str.clone()))?;
+
+    let action = Action {
+        id: row.get(0)?,
+        account_id: row.get(1)?,
+        message_id: row.get(2)?,
+        decision_id: row.get(3)?,
+        action_type: row.get(4)?,
+        parameters_json: serde_json::from_str(&parameters_json)?,
+        status,
+        error_message: row.get(7)?,
+        executed_at: match executed_at_str {
+            Some(value) => Some(DateTime::parse_from_rfc3339(&value)?.with_timezone(&Utc)),
+            None => None,
+        },
+        undo_hint_json: serde_json::from_str(&undo_hint_json_str)?,
+        trace_id: row.get(10)?,
+        created_at: DateTime::parse_from_rfc3339(&created_at_str)?.with_timezone(&Utc),
+        updated_at: DateTime::parse_from_rfc3339(&updated_at_str)?.with_timezone(&Utc),
+        org_id,
+        user_id,
+    };
+
+    // Parse decision fields (indices 15-28) if present
+    let decision_id_check: Option<String> = row.get(15)?;
+    let decision = if decision_id_check.is_some() {
+        Some(row_to_decision_from_offset(&row, 15).map_err(|e| {
+            ActionError::Json(serde_json::error::Error::custom(format!(
+                "decision parse error: {}",
+                e
+            )))
+        })?)
+    } else {
+        None
+    };
+
+    // Parse message fields (indices 29-33)
+    let message_subject: Option<String> = row.get(29)?;
+    let message_from_email: Option<String> = row.get(30)?;
+    let message_from_name: Option<String> = row.get(31)?;
+    let message_snippet: Option<String> = row.get(32)?;
+    let provider_message_id: Option<String> = row.get(33)?;
+
+    // Account email (index 34)
+    let account_email: Option<String> = row.get(34)?;
+
+    // Undo action ID (index 35)
+    let undo_action_id: Option<String> = row.get(35)?;
+
+    Ok(ActionDetailRow {
+        action,
+        decision,
+        message_subject,
+        message_from_email,
+        message_from_name,
+        message_snippet,
+        provider_message_id,
+        account_email,
+        undo_action_id,
+    })
+}
+
+fn row_to_decision_from_offset(row: &Row, offset: i32) -> Result<Decision, DecisionError> {
+    let source: String = row.get(offset + 3)?;
+    let decision_json: String = row.get(offset + 4)?;
+    let needs_approval: i64 = row.get(offset + 7)?;
+    let telemetry_json: String = row.get(offset + 9)?;
+    let created_at: String = row.get(offset + 10)?;
+    let updated_at: String = row.get(offset + 11)?;
+    let org_id: i64 = row.get(offset + 12)?;
+    let user_id: i64 = row.get(offset + 13)?;
+
+    let source = DecisionSource::from_str(&source)
+        .ok_or_else(|| DecisionError::InvalidSource(source.clone()))?;
+
+    Ok(Decision {
+        id: row.get(offset)?,
+        account_id: row.get(offset + 1)?,
+        message_id: row.get(offset + 2)?,
+        source,
+        decision_json: serde_json::from_str(&decision_json)?,
+        action_type: row.get(offset + 5)?,
+        confidence: row.get(offset + 6)?,
+        needs_approval: needs_approval != 0,
+        rationale: row.get(offset + 8)?,
+        telemetry_json: serde_json::from_str(&telemetry_json)?,
+        created_at: DateTime::parse_from_rfc3339(&created_at)?.with_timezone(&Utc),
+        updated_at: DateTime::parse_from_rfc3339(&updated_at)?.with_timezone(&Utc),
+        org_id,
+        user_id,
+    })
 }
 
 #[derive(Clone)]
@@ -1223,6 +1647,83 @@ mod tests {
             .expect("queued");
         assert_eq!(queued.len(), 1);
         assert_eq!(queued[0].id, a1.id);
+    }
+
+    #[tokio::test]
+    async fn action_list_filtered_handles_defaults_and_confidence_range() {
+        let (db, _dir) = setup_db().await;
+        let account_id = seed_account(&db).await;
+        let thread_id = seed_thread(&db, &account_id, "t1").await;
+        let message_id = seed_message(&db, &account_id, &thread_id, "m1").await;
+
+        let decisions = DecisionRepository::new(db.clone());
+        let decision = decisions
+            .create(sample_new_decision(&account_id, &message_id))
+            .await
+            .expect("decision");
+
+        let repo = ActionRepository::new(db.clone());
+        let with_confidence = repo
+            .create(sample_new_action(
+                &account_id,
+                &message_id,
+                Some(&decision.id),
+                ActionStatus::Queued,
+            ))
+            .await
+            .expect("action with confidence");
+
+        let without_confidence = repo
+            .create(sample_new_action(
+                &account_id,
+                &message_id,
+                None,
+                ActionStatus::Queued,
+            ))
+            .await
+            .expect("action without confidence");
+
+        let (all_items, total_all) = repo
+            .list_filtered(
+                DEFAULT_ORG_ID,
+                DEFAULT_USER_ID,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                10,
+                0,
+            )
+            .await
+            .expect("list without filters");
+        assert_eq!(total_all, 2);
+        let ids: Vec<String> = all_items.iter().map(|item| item.id.clone()).collect();
+        assert!(ids.contains(&with_confidence.id));
+        assert!(ids.contains(&without_confidence.id));
+
+        let (conf_items, conf_total) = repo
+            .list_filtered(
+                DEFAULT_ORG_ID,
+                DEFAULT_USER_ID,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(0.5),
+                Some(1.0),
+                10,
+                0,
+            )
+            .await
+            .expect("list with confidence filter");
+
+        assert_eq!(conf_total, 1);
+        assert_eq!(conf_items.len(), 1);
+        assert_eq!(conf_items[0].id, with_confidence.id);
     }
 
     #[tokio::test]
