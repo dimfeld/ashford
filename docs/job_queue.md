@@ -7,7 +7,7 @@
     - action.gmail - Execute Gmail actions (archive, apply_label, remove_label, mark_read, mark_unread, star, unstar, trash, restore, delete, snooze)
     - unsnooze.gmail - Restore snoozed messages to inbox at scheduled time
     - approval.notify - Request approval via Discord
-    - undo - Reverse a previous action
+    - undo.action - Reverse a previously completed action
     - outbound.send - Send auto_reply/forward emails
     - backfill.gmail - Bulk sync historical messages
     - history.sync.gmail - Incremental sync via Gmail History API
@@ -97,6 +97,7 @@ Job type constants are defined in `server/crates/ashford-core/src/jobs/mod.rs`:
 - `JOB_TYPE_BACKFILL_GMAIL` = "backfill.gmail"
 - `JOB_TYPE_LABELS_SYNC_GMAIL` = "labels.sync.gmail"
 - `JOB_TYPE_OUTBOUND_SEND` = "outbound.send"
+- `JOB_TYPE_UNDO_ACTION` = "undo.action"
 
 ### 5.3.1 Scheduled Jobs
 
@@ -352,17 +353,26 @@ The outbound.send job sends emails for forward and auto_reply actions. It constr
 The `MimeMessage` struct (in `server/crates/ashford-core/src/gmail/mime_builder.rs`) uses the `mail-builder` crate:
 
 ```rust
-let message = MimeMessage::new()
-    .from(EmailAddress::new("sender@example.com", Some("Sender Name")))
-    .to(EmailAddress::new("recipient@example.com", None))
-    .subject("Re: Original Subject")
-    .body_plain("Plain text content")
-    .body_html("<p>HTML content</p>")
-    .in_reply_to("<original-message-id@gmail.com>")
-    .references("<thread-references@gmail.com>")
-    .attachment("document.pdf", "application/pdf", file_bytes);
+use ashford_core::gmail::{EmailAddress, MimeAttachment, MimeMessage};
 
-let raw_message = message.to_base64url()?;
+let message = MimeMessage {
+    from: EmailAddress::new(Some("Sender Name"), "sender@example.com"),
+    to: vec![EmailAddress::new(None, "recipient@example.com")],
+    cc: vec![],
+    bcc: vec![],
+    subject: Some("Re: Original Subject".to_string()),
+    body_plain: Some("Plain text content".to_string()),
+    body_html: Some("<p>HTML content</p>".to_string()),
+    in_reply_to: Some("<original-message-id@gmail.com>".to_string()),
+    references: vec!["<thread-references@gmail.com>".to_string()],
+    attachments: vec![MimeAttachment {
+        filename: "document.pdf".to_string(),
+        content_type: "application/pdf".to_string(),
+        data: file_bytes, // Vec<u8>
+    }],
+};
+
+let raw_message = message.to_base64_url()?;
 ```
 
 **Undo Hints**:
@@ -384,3 +394,87 @@ Forward and auto_reply actions are irreversible. The undo hint indicates this:
 
 **Idempotency key**: `outbound.send:{account_id}:{action_id}`
 
+### 5.10 Undo Action Job
+
+The undo.action job reverses a previously completed Gmail action by executing its inverse operation.
+
+**Payload**:
+```json
+{
+  "account_id": "uuid",
+  "original_action_id": "uuid"
+}
+```
+
+**Flow**:
+1. Parse payload and load original action from database
+2. Validate action is undoable:
+   - Status must be `Completed`
+   - `undo_hint_json.inverse_action` must not be `"none"`
+   - `undo_hint_json.irreversible` must not be `true`
+   - No existing `action_link` with `undo_of` relation for this action
+3. Create undo action record and action_link atomically (for idempotency across retries)
+4. Execute inverse action via Gmail API based on `inverse_action` type
+5. On success: mark undo action as `Completed` with non-reversible undo hint
+6. On failure: mark undo action as `Failed` with error message
+
+**Supported Inverse Actions**:
+
+| Original Action | Inverse Action | Gmail API Call |
+|-----------------|----------------|----------------|
+| `archive` | `apply_label` | Add INBOX label |
+| `apply_label` | `remove_label` | Remove the applied label |
+| `remove_label` | `apply_label` | Add the removed label back |
+| `mark_read` | `mark_unread` | Add UNREAD label |
+| `mark_unread` | `mark_read` | Remove UNREAD label |
+| `star` | `unstar` | Remove STARRED label |
+| `unstar` | `star` | Add STARRED label |
+| `trash` | `restore` | Call `untrash_message` |
+| `restore` | `trash` | Call `trash_message` |
+| `snooze` | (special) | Cancel unsnooze job + restore labels |
+
+**Irreversible Actions** (undo rejected with fatal error):
+- `delete` - Message permanently deleted
+- `forward` - Email already sent
+- `auto_reply` - Reply already sent
+
+**Snooze Undo**:
+Snooze undo requires special handling:
+1. Extract `cancel_unsnooze_job_id` from `inverse_parameters`
+2. Cancel the scheduled unsnooze job via `JobQueue::cancel()`
+   - `Ok(())` → Job was pending, now canceled
+   - `NotRunning` → Job already completed (unsnooze already ran)
+   - `JobNotFound` → Job doesn't exist (already cleaned up)
+3. Apply label changes from `inverse_parameters`:
+   - Add labels from `add_labels` (typically INBOX)
+   - Remove labels from `remove_labels` (the snooze label)
+
+All three cancellation outcomes are treated as success—the undo proceeds with label changes regardless.
+
+**Idempotency**:
+The undo system is designed to be idempotent across retries and concurrent requests:
+1. Before executing the inverse action, the handler creates an undo action record and action_link
+2. The undo action stores the owning `job_id` to prevent other jobs from executing it
+3. If another request tries to undo the same action, the unique constraint on action_links fails
+4. On retry, the handler reuses the existing undo action record
+
+**Action Link Semantics**:
+The `action_link` created for undo uses:
+- `cause_action_id`: The new undo action's ID
+- `effect_action_id`: The original action's ID
+- `relation_type`: `undo_of`
+
+This means "the undo action is the undo of the original action."
+
+**Retry Exhaustion**:
+When a retryable error occurs on the final allowed attempt (job.attempts >= job.max_attempts), the handler marks the undo action as `Failed` before returning the error. This ensures undo actions reach a terminal state rather than remaining in `Executing` indefinitely.
+
+**Error Handling**:
+- Action not found → Fatal error
+- Action not undoable → Fatal error (already undone, irreversible, or not completed)
+- Message not found (404) → Action marked as failed (message deleted externally)
+- Rate limiting (429) → Retryable with backoff
+- Server error (5xx) → Retryable with backoff
+- Account/ownership mismatch → Fatal error
+
+**Idempotency key**: `undo.action:{account_id}:{original_action_id}`

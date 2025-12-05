@@ -333,10 +333,7 @@ mod tests {
             "<c@d.com>".to_string(),
         ];
         let result = dedup_message_ids(ids);
-        assert_eq!(
-            result,
-            vec!["a@b.com".to_string(), "c@d.com".to_string(),]
-        );
+        assert_eq!(result, vec!["a@b.com".to_string(), "c@d.com".to_string(),]);
     }
 
     #[test]

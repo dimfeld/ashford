@@ -236,6 +236,25 @@ CREATE INDEX action_links_cause_idx
 CREATE INDEX action_links_effect_idx
   ON action_links(effect_action_id);
 
+-- Ensures each action can only be undone once
+CREATE UNIQUE INDEX action_links_effect_undo_unique
+  ON action_links(effect_action_id)
+  WHERE relation_type = 'undo_of';
+
+**Relation Types:**
+- `undo_of` - The cause action is the undo of the effect action (one-to-one, enforced by unique index)
+- `approval_for` - The cause action approved the effect action
+- `spawned` - The cause action created/spawned the effect action
+- `related` - General relationship between actions
+
+**Undo Semantics:**
+When an action is undone, the `action_link` records:
+- `cause_action_id`: The new undo action's ID
+- `effect_action_id`: The original action's ID
+- `relation_type`: `undo_of`
+
+The unique partial index on `(effect_action_id) WHERE relation_type = 'undo_of'` ensures each action can only be undone once. This prevents double-undo scenarios and provides idempotency for concurrent undo requests.
+
 
 ⸻
 

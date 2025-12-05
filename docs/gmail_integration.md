@@ -175,22 +175,28 @@ pub struct SendMessageResponse {
 The `MimeMessage` struct (in `server/crates/ashford-core/src/gmail/mime_builder.rs`) constructs RFC 2822 compliant emails using the `mail-builder` crate:
 
 ```rust
-use ashford_core::gmail::{MimeMessage, EmailAddress};
+use ashford_core::gmail::{EmailAddress, MimeAttachment, MimeMessage};
 
-// Build an email message
-let message = MimeMessage::new()
-    .from(EmailAddress::new("sender@gmail.com", Some("Sender Name")))
-    .to(EmailAddress::new("recipient@example.com", None))
-    .cc(EmailAddress::new("cc@example.com", Some("CC Name")))
-    .subject("Re: Original Subject")
-    .body_plain("Plain text body")
-    .body_html("<p>HTML body</p>")
-    .in_reply_to("<original-message-id@gmail.com>")  // For replies
-    .references("<ref1@gmail.com> <ref2@gmail.com>") // Thread chain
-    .attachment("document.pdf", "application/pdf", file_bytes);
+// Build an email message (fields are plain structs, no builder methods)
+let message = MimeMessage {
+    from: EmailAddress::new(Some("Sender Name"), "sender@gmail.com"),
+    to: vec![EmailAddress::new(None, "recipient@example.com")],
+    cc: vec![EmailAddress::new(Some("CC Name"), "cc@example.com")],
+    bcc: vec![],
+    subject: Some("Re: Original Subject".to_string()),
+    body_plain: Some("Plain text body".to_string()),
+    body_html: Some("<p>HTML body</p>".to_string()),
+    in_reply_to: Some("<original-message-id@gmail.com>".to_string()),  // For replies
+    references: vec!["<ref1@gmail.com>".to_string(), "<ref2@gmail.com>".to_string()], // Thread chain
+    attachments: vec![MimeAttachment {
+        filename: "document.pdf".to_string(),
+        content_type: "application/pdf".to_string(),
+        data: file_bytes, // Vec<u8>
+    }],
+};
 
 // Get base64url-encoded output for Gmail API
-let raw = message.to_base64url()?;
+let raw = message.to_base64_url()?;
 ```
 
 **EmailAddress**:
@@ -201,7 +207,7 @@ pub struct EmailAddress {
 }
 
 // Creates: "Display Name <email@example.com>" or just "email@example.com"
-EmailAddress::new("email@example.com", Some("Display Name"))
+EmailAddress::new(Some("Display Name"), "email@example.com")
 ```
 
 **Threading Headers**:
@@ -232,3 +238,56 @@ Attachments are Base64-encoded in the MIME message per RFC 2045.
 
 See job_queue.md section 5.9 for the `outbound.send` job that orchestrates email sending.
 
+### **6.6 Undo Operations**
+
+Ashford supports undoing most Gmail actions by storing undo hints when actions are executed and reversing them on request.
+
+**Undo Hint Structure**:
+Each completed action stores its undo information in `undo_hint_json`:
+```json
+{
+  "pre_labels": ["INBOX", "UNREAD"],
+  "pre_unread": true,
+  "pre_starred": false,
+  "pre_in_inbox": true,
+  "pre_in_trash": false,
+  "action": "archive",
+  "inverse_action": "apply_label",
+  "inverse_parameters": {"label": "INBOX"}
+}
+```
+
+**Undoable Actions**:
+| Action | Inverse Operation |
+|--------|-------------------|
+| Archive | Add INBOX label |
+| Apply label | Remove the applied label |
+| Remove label | Add the removed label |
+| Mark read | Mark unread (add UNREAD) |
+| Mark unread | Mark read (remove UNREAD) |
+| Star | Unstar (remove STARRED) |
+| Unstar | Star (add STARRED) |
+| Trash | Restore from trash |
+| Restore | Move to trash |
+| Snooze | Cancel unsnooze job + restore to inbox |
+
+**Irreversible Actions**:
+These actions cannot be undone and store `{"inverse_action": "none", "irreversible": true}`:
+- `delete` - Message permanently deleted from Gmail
+- `forward` - Email already sent to recipient
+- `auto_reply` - Reply already sent
+
+**Snooze Undo**:
+Snooze undo is more complex because it involves both Gmail state and a scheduled job:
+1. The undo handler cancels the scheduled `unsnooze.gmail` job
+2. Restores the message to INBOX (adds INBOX label)
+3. Removes the snooze label
+
+If the unsnooze job has already run, the cancel is a no-op but label changes still apply.
+
+**Double-Undo Prevention**:
+Each action can only be undone once. The system uses a unique constraint on `action_links` to enforce this:
+- When an undo is executed, an `action_link` with `relation_type='undo_of'` is created
+- Subsequent undo attempts fail with "action already undone"
+
+See job_queue.md section 5.10 for the `undo.action` job implementation details.
