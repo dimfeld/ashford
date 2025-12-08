@@ -38,6 +38,8 @@ pub struct LabelColors {
 #[ts(export)]
 pub struct LabelSummary {
     pub id: String,
+    pub account_id: String,
+    pub provider_label_id: String,
     pub name: String,
     pub label_type: String,
     pub description: Option<String>,

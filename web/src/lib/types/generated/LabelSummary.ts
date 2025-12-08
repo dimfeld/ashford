@@ -4,4 +4,4 @@ import type { LabelColors } from "./LabelColors";
 /**
  * Summary of a label for API responses.
  */
-export type LabelSummary = { id: string, name: string, label_type: string, description: string | null, colors: LabelColors, };
+export type LabelSummary = { id: string, account_id: string, provider_label_id: string, name: string, label_type: string, description: string | null, colors: LabelColors, };

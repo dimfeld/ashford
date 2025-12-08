@@ -128,17 +128,139 @@ The SvelteKit application uses a **remote functions** pattern where:
   - Conditions summary (for deterministic rules)
   - Example effect / description
 - Controls:
-  - Enable/disable toggle
-  - Reorder priorities (e.g., drag/drop or up/down)
-  - Edit button (opens form or navigates to Assistant with preloaded context)
+  - Enable/disable toggle (optimistic UI with revert on error)
+  - Reorder priorities (up/down arrow buttons for deterministic rules)
+  - Edit button (navigates to form page)
+  - Delete button with confirmation dialog
 
 **Data Flow:**
 1. Load rules: Remote function calls `GET /api/rules/deterministic` and `GET /api/rules/llm`
 2. Toggle enable/disable: Form action calls `PATCH /api/rules/{type}/{id}`
-3. Reorder: Form action calls `PATCH /api/rules/{type}/{id}` with new priority
+3. Reorder: Uses `POST /api/rules/deterministic/swap-priorities` endpoint to atomically swap priorities between adjacent rules (prevents race conditions that could corrupt priority ordering)
 4. Create/Edit: Form action calls `POST /api/rules/{type}` or `PATCH /api/rules/{type}/{id}`
 
-### 4. Rules Assistant `/rules/assistant`
+### 4. Deterministic Rule Form `/rules/deterministic/[id]`
+
+**Purpose:** Create or edit deterministic rules with structured conditions and actions.
+
+**URL Patterns:**
+- `/rules/deterministic/new` - Create a new deterministic rule
+- `/rules/deterministic/[id]` - Edit an existing deterministic rule
+
+**UI Components:**
+- **Basic Information Card:**
+  - Name (required text input)
+  - Description (optional textarea)
+  - Enabled toggle (Switch component)
+  - Priority number input (lower = earlier execution)
+- **Scope Card:**
+  - Scope type dropdown: global, account, sender, domain
+  - Scope reference input (conditional, shown for non-global scopes)
+- **Conditions Card:**
+  - ConditionBuilder component (see below)
+- **Action Card:**
+  - Action type dropdown with grouped options:
+    - Safe: archive, apply_label, remove_label, mark_read, mark_unread, move, trash, restore, none
+    - Reversible: star, unstar, snooze, add_note, create_task
+    - Dangerous: delete, forward, auto_reply, escalate
+  - Dynamic parameter fields based on action type:
+    - `apply_label`/`remove_label`: Label dropdown selector
+    - `forward`: Email address input
+    - `auto_reply`: Body textarea
+    - `snooze`: DateTime picker
+  - Safe mode dropdown: default, always_safe, dangerous_override
+- Save and Cancel buttons
+
+**Data Flow:**
+1. Page load (edit mode): Fetch rule via `GET /api/rules/deterministic/{id}`
+2. Page load (new mode): Initialize empty form state
+3. Save: Call `POST /api/rules/deterministic` (new) or `PATCH /api/rules/deterministic/{id}` (edit)
+4. Validation: Client-side required field and action parameter validation
+
+### 5. Condition Builder Component
+
+**Location:** `web/src/lib/components/ConditionBuilder.svelte`
+
+**Purpose:** Visual builder for deterministic rule matching conditions.
+
+**UI Components:**
+- **Logical Operator Toggle:** Match ALL (AND) or ANY (OR) conditions
+  - Only shown when 2+ conditions exist
+- **Condition Rows:** Each row contains:
+  - Type dropdown:
+    - `sender_email` - Exact or wildcard (*@domain.com) email match
+    - `sender_domain` - Domain-only match
+    - `subject_contains` - Case-insensitive substring match
+    - `subject_regex` - Full regex pattern
+    - `header_match` - Regex on specific header (two inputs: header name, pattern)
+    - `label_present` - Check for Gmail label (dropdown populated from API)
+  - Value input(s) appropriate to the condition type
+  - Remove button (trash icon)
+- **Add Condition Button**
+
+**Output Format:**
+```json
+// Single condition
+{ "type": "sender_domain", "value": "amazon.com" }
+
+// Multiple conditions with AND
+{
+  "op": "and",
+  "children": [
+    { "type": "sender_domain", "value": "amazon.com" },
+    { "type": "subject_contains", "value": "order" }
+  ]
+}
+```
+
+**Utility Functions:** `web/src/lib/components/condition-builder-utils.ts`
+- `parseConditionsJson(json)` - Parse API conditions into UI rows
+- `buildConditionsJson(operator, rows)` - Build API-compatible conditions from UI state
+- `leafToRow(leaf)` / `rowToLeaf(row)` - Convert between API and UI representations
+- `hasNestedLogicalConditions(children)` - Detect nested logical groups in conditions
+- `flattenConditionToLeaves(condition)` - Recursively extract all leaf conditions from nested trees
+- `isLeafCondition(obj)` / `isLogicalCondition(obj)` - Type guards for condition discrimination
+
+**Nested Condition Handling:**
+
+The condition builder UI supports only flat condition lists (one level of AND/OR). When editing a rule with nested logical conditions (created via API), the utility functions handle this gracefully:
+
+1. **Detection**: `hasNestedLogicalConditions()` checks if any children are LogicalConditions
+2. **Flattening**: Nested conditions are recursively flattened to extract all leaf conditions
+3. **Warnings**: The component emits warnings via `onwarnings` callback when flattening occurs:
+   - NOT conditions are converted to their positive equivalents (may invert logic)
+   - Original nested structure will be lost when saving
+   - Users are advised to use the API directly for complex nested conditions
+
+This ensures existing rules with complex conditions can still be viewed and edited, while clearly communicating that the original structure cannot be preserved.
+
+### 6. LLM Rule Form `/rules/llm/[id]`
+
+**Purpose:** Create or edit LLM rules with natural language instructions.
+
+**URL Patterns:**
+- `/rules/llm/new` - Create a new LLM rule
+- `/rules/llm/[id]` - Edit an existing LLM rule
+
+**UI Components:**
+- **Basic Information Card:**
+  - Name (required text input)
+  - Description (optional textarea)
+  - Enabled toggle (Switch component)
+- **Scope Card:**
+  - Scope type dropdown: global, account, sender, domain
+  - Scope reference input (conditional, shown for non-global scopes)
+- **Rule Instructions Card:**
+  - Large textarea for `rule_text`
+  - Placeholder with example instructions
+- Save and Cancel buttons
+
+**Data Flow:**
+1. Page load (edit mode): Fetch rule via `GET /api/rules/llm/{id}`
+2. Page load (new mode): Initialize empty form state
+3. Save: Call `POST /api/rules/llm` (new) or `PATCH /api/rules/llm/{id}` (edit)
+
+### 7. Rules Assistant `/rules/assistant`
 
 **Purpose:** Natural language interface for creating and modifying rules via AI assistance.
 
@@ -164,7 +286,7 @@ The SvelteKit application uses a **remote functions** pattern where:
 3. Apply changes: Form action calls remote function → `POST /api/rules/assistant/apply` → persists rule changes to database
 4. Conversation context maintained on server between requests
 
-### 5. Settings `/settings`
+### 8. Settings `/settings`
 
 **Purpose:** View system configuration (read-only for now).
 
@@ -264,7 +386,7 @@ For real-time streaming (LLM responses), use the SSE pattern described above.
 
 ### Example: Query Remote Function
 
-See `$lib/api/actions.remote.ts` and `$lib/api/accounts.remote.ts` for complete working examples.
+See `$lib/api/actions.remote.ts`, `$lib/api/accounts.remote.ts`, and `$lib/api/rules.remote.ts` for complete working examples.
 
 ```typescript
 // lib/actions.remote.ts
@@ -320,55 +442,82 @@ export const getAction = query(
 {/if}
 ```
 
-### Example: Command Remote Function
+### Example: Form Remote Function (Preferred for Mutations)
+
+**Prefer `form` over `command` for mutations.** Form remote functions provide:
+- Progressive enhancement (works without JavaScript)
+- Built-in validation with field-level error display via `.fields.fieldName.issues()`
+- Pending state tracking via `form.pending`
+- Automatic form data binding via `.fields.fieldName.as('type')`
+- Server-side error injection via `invalid(issue.fieldName('message'))`
+
+See `docs/svelte_remote_functions.md` and https://svelte.dev/docs/kit/remote-functions#form for complete documentation.
 
 ```typescript
-// lib/actions.remote.ts (continued)
-import { command } from '$app/server';
+// lib/rules.remote.ts
+import { form, invalid } from '$app/server';
+import { z } from 'zod';
 import { post } from '$lib/api/client';
+import { ApiError } from '$lib/api/errors';
 
-// Define a command for undoing an action
-export const undoAction = command(
-  v.object({
-    actionId: v.string(),
-    reason: v.optional(v.string())
-  }),
-  async (input) => {
-    const result = await post(`/api/actions/${input.actionId}/undo`, {
-      reason: input.reason
-    });
+// Schema for creating a rule
+const createRuleSchema = z.object({
+  name: z.string().min(1, 'Name is required'),
+  description: z.string().optional(),
+  enabled: z.boolean().default(true)
+});
 
-    // Refresh the action detail after undo
-    getAction({ id: input.actionId }).refresh();
-
-    return result;
+// Define a form for creating a rule
+export const createRule = form(
+  createRuleSchema,
+  async (input, issue) => {
+    try {
+      const result = await post('/api/rules/deterministic', input);
+      return { success: true, rule: result };
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 400) {
+        // Server returned validation error - mark field as invalid
+        invalid(issue.name('A rule with this name already exists'));
+      }
+      throw e;
+    }
   }
 );
 ```
 
 ```svelte
-<!-- routes/actions/[id]/+page.svelte -->
+<!-- routes/rules/deterministic/new/+page.svelte -->
 <script lang="ts">
-  import { getAction, undoAction } from '$lib/actions.remote';
-  import { page } from '$app/state';
+  import { createRule } from '$lib/api/rules.remote';
 
-  let actionId = $derived(page.params.id);
-  let result = await getAction({ id: actionId });
-
-  async function handleUndo() {
-    try {
-      await undoAction({ actionId });
-      // getAction automatically refreshes due to the .refresh() call in undoAction
-    } catch (error) {
-      console.error('Undo failed:', error);
-    }
-  }
+  // Use a stable ID - for new entities use $props.id(), for existing use the entity ID
+  const uid = $props.id();
+  const ruleForm = createRule.for(uid);
 </script>
 
-{#if result}
-  <ActionDetail action={result} />
-  <button onclick={handleUndo}>Undo Action</button>
-{/if}
+<form {...ruleForm.preflight(createRuleSchema).enhance()}>
+  <label for="name">Name</label>
+  <input id="name" {...ruleForm.fields.name.as('text')} />
+  {#each ruleForm.fields.name.issues() as issue}
+    <p class="error">{issue.message}</p>
+  {/each}
+
+  <label for="description">Description</label>
+  <textarea id="description" {...ruleForm.fields.description.as('text')} />
+
+  <label>
+    <input type="checkbox" {...ruleForm.fields.enabled.as('checkbox')} />
+    Enabled
+  </label>
+
+  <button type="submit" disabled={!!ruleForm.pending}>
+    {ruleForm.pending ? 'Creating...' : 'Create Rule'}
+  </button>
+
+  {#each ruleForm.fields.allIssues() as issue}
+    <p class="error">{issue.message}</p>
+  {/each}
+</form>
 ```
 
 ### Example: Streaming SSE Endpoint
@@ -454,21 +603,62 @@ The Rust backend exposes the following REST endpoints on `http://127.0.0.1:17800
 
 ### Rules
 - `GET /api/rules/deterministic` - List all deterministic rules
-  - Returns: Array of deterministic rules with conditions
-- `GET /api/rules/llm` - List all LLM rules
-  - Returns: Array of LLM rules with prompts/examples
+  - Returns: Array of `DeterministicRule` sorted by priority ASC (lower number = earlier execution)
+- `GET /api/rules/deterministic/{id}` - Get a single deterministic rule
+  - Returns: `DeterministicRule` or 404 if not found
 - `POST /api/rules/deterministic` - Create new deterministic rule
-  - Body: Rule configuration JSON
-  - Returns: Created rule with ID
-- `PATCH /api/rules/deterministic/{id}` - Update deterministic rule
-  - Body: Partial rule configuration
-  - Returns: Updated rule
+  - Body: `{ name: string (required), description?: string, scope?: RuleScope (default global), scope_ref?: string, priority?: number (default 100), enabled?: boolean (default true), conditions_json: object (required), action_type: string (required), action_parameters_json?: object, safe_mode?: SafeMode }`
+  - Note: If `scope` is `global`, any provided `scope_ref` is ignored and set to null
+  - Returns: Created `DeterministicRule` with generated ID (201)
+  - Errors: 400 if name, action_type, or conditions_json is missing/empty
+- `PATCH /api/rules/deterministic/{id}` - Update deterministic rule (partial)
+  - Body: Any subset of `{ name, description, scope, scope_ref, priority, enabled, disabled_reason, conditions_json, action_type, action_parameters_json, safe_mode }`
+  - **Three-state logic for clearable fields** (`description`, `scope_ref`, `disabled_reason`):
+    - Field absent from JSON → keep existing value unchanged
+    - Field explicitly set to `null` → clear the value to null
+    - Field set to a value → update to the new value
+  - **Automatic scope_ref clearing**: When `scope` is changed to `global`, `scope_ref` is automatically set to null to prevent dangling references
+  - Returns: Updated `DeterministicRule`
+  - Errors: 404 if not found
+- `DELETE /api/rules/deterministic/{id}` - Delete deterministic rule
+  - Returns: 204 No Content on success
+  - Errors: 404 if not found
+- `POST /api/rules/deterministic/swap-priorities` - Atomically swap priorities between two deterministic rules
+  - Body: `{ rule_a_id: string, rule_b_id: string }`
+  - Implementation: Uses a database transaction to prevent TOCTOU race conditions
+    - Transaction starts before reading priorities
+    - Both rules' priorities are read and swapped atomically
+    - Row count verification ensures exactly 1 row updated per rule
+  - Returns: 200 with `{ success: true }` on success
+  - Errors: 400 (self-swap or missing IDs), 404 (rule not found), 500 (internal error)
+  - Used by the UI for priority reordering to ensure data consistency
+- `GET /api/rules/llm` - List all LLM rules
+  - Returns: Array of `LlmRule`
+- `GET /api/rules/llm/{id}` - Get a single LLM rule
+  - Returns: `LlmRule` or 404 if not found
 - `POST /api/rules/llm` - Create new LLM rule
-  - Body: Rule configuration JSON
-  - Returns: Created rule with ID
-- `PATCH /api/rules/llm/{id}` - Update LLM rule
-  - Body: Partial rule configuration
-  - Returns: Updated rule
+  - Body: `{ name: string (required), description?: string, scope?: RuleScope (default global), scope_ref?: string, rule_text: string (required), enabled?: boolean (default true), metadata_json?: object }`
+  - Note: If `scope` is `global`, any provided `scope_ref` is ignored and set to null
+  - Returns: Created `LlmRule` with generated ID (201)
+  - Errors: 400 if name or rule_text is missing/empty
+- `PATCH /api/rules/llm/{id}` - Update LLM rule (partial)
+  - Body: Any subset of `{ name, description, scope, scope_ref, rule_text, enabled, metadata_json }`
+  - **Three-state logic for clearable fields** (`description`, `scope_ref`):
+    - Field absent from JSON → keep existing value unchanged
+    - Field explicitly set to `null` → clear the value to null
+    - Field set to a value → update to the new value
+  - **Automatic scope_ref clearing**: When `scope` is changed to `global`, `scope_ref` is automatically set to null to prevent dangling references
+  - Returns: Updated `LlmRule`
+  - Errors: 404 if not found
+- `DELETE /api/rules/llm/{id}` - Delete LLM rule
+  - Returns: 204 No Content on success
+  - Errors: 404 if not found
+
+### Labels
+- `GET /api/labels` - List all labels across all accounts
+  - Returns: Array of `LabelSummary` with `{ id, account_id, provider_label_id, name, label_type, description, colors: { background_color, text_color } }`
+  - Used by the condition builder to populate the label_present dropdown
+  - Gracefully handles per-account errors (logs and continues with other accounts)
 
 ### Rules Assistant
 - `POST /api/rules/assistant/message` - Send chat message to assistant (non-streaming)

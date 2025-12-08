@@ -650,7 +650,9 @@ impl ActionRepository {
                 conditions.push("m.from_email = ?".to_string());
                 params.push(sender.to_string().into());
             } else {
-                conditions.push("(m.from_email LIKE '%@' || ? OR m.from_email LIKE '%.' || ?)".to_string());
+                conditions.push(
+                    "(m.from_email LIKE '%@' || ? OR m.from_email LIKE '%.' || ?)".to_string(),
+                );
                 params.push(sender.to_string().into());
                 params.push(sender.to_string().into());
             }

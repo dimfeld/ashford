@@ -446,7 +446,7 @@ async fn undo_action(State(state): State<AppState>, Path(id): Path<String>) -> i
 mod tests {
     use super::*;
     use ashford_core::{
-        ActionRepository, ActionStatus, Database, NewAction, DEFAULT_ORG_ID, DEFAULT_USER_ID,
+        ActionRepository, ActionStatus, DEFAULT_ORG_ID, DEFAULT_USER_ID, Database, NewAction,
         migrations::run_migrations,
     };
     use axum::body::to_bytes;
@@ -631,12 +631,7 @@ mod tests {
             .await
             .expect("body bytes");
         let body: serde_json::Value = serde_json::from_slice(&body_bytes).expect("json body");
-        assert_eq!(
-            status,
-            StatusCode::BAD_REQUEST,
-            "body: {}",
-            body
-        );
+        assert_eq!(status, StatusCode::BAD_REQUEST, "body: {}", body);
         assert_eq!(body.get("error"), Some(&json!("bad_request")));
         assert!(
             body["message"]
@@ -693,12 +688,7 @@ mod tests {
             .await
             .expect("body bytes");
         let body: serde_json::Value = serde_json::from_slice(&body_bytes).expect("json body");
-        assert_eq!(
-            status,
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "body: {}",
-            body
-        );
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "body: {}", body);
         assert_eq!(body.get("error"), Some(&json!("internal_error")));
         assert!(
             body["message"]
